@@ -283,3 +283,19 @@ test('P26.7 plugin icons are fully removed from manifests and assets', () => {
   assert.equal(plugin.icon, undefined);
   assert.equal(existsSync(join(root, 'lib', 'assets', 'icon.png')), false);
 });
+
+test('P30 web client warns and disables desktop-only actions', () => {
+  const source = readFileSync(CLIENT, 'utf8');
+  assert.match(source, /const IS_DESKTOP/);
+  assert.match(source, /const IS_WEB = !IS_DESKTOP/);
+  assert.ok(
+    source.includes(
+      '❌ VHCU 仅支持 DSH 桌面版 (Desktop App)。浏览器版受系统沙盒限制，无法控制本地电脑。',
+    ),
+  );
+  assert.match(source, /disabled: IS_WEB \|\| busy/);
+  assert.match(source, /disabled: IS_WEB \|\| hearBusy/);
+  assert.match(source, /disabled: IS_WEB \|\| recordingBusy/);
+  const readme = readFileSync(join(HERE, '..', '..', 'README.md'), 'utf8');
+  assert.match(readme, /不支持 Web 网页端/);
+});

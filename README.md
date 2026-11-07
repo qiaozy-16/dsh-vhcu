@@ -17,7 +17,7 @@ Local-first screen understanding, system-audio transcription, and safe Windows i
 > **Before installing, read this.**
 >
 > - **Required companion:** this plugin's UI is designed to work with **`dsh-better-sidebar`**. Install and enable it in the same DSH profile first. VHCU will not render a usable panel without a sidebar host.
-> - **Windows only:** screen capture uses Windows GDI/BitBlt, input uses `SendInput`, and Hear uses WASAPI loopback. macOS and Linux are not supported.
+> - **Windows only — DSH Desktop App only:** screen capture uses Windows GDI/BitBlt, input uses `SendInput`, and Hear uses WASAPI loopback. macOS and Linux are not supported. **仅支持 Windows 系统下的 DSH 桌面版 (Desktop App)，不支持 Web 网页端；浏览器沙盒无法启动本地 Python 或注入键鼠。**
 > - **DSH version:** **0.2.1-rc.3 is recommended** (tested profile). The plugin declares compatibility for `0.2.0-rc.2`, `0.2.1-rc.2`, and `0.2.1-rc.3`.
 > - **This plugin can control your real mouse and keyboard.** Read the [Safety](#safety) section before using the privacy-shield override or automatic approval of sensitive operations.
 
@@ -415,6 +415,7 @@ Test suites use `VHCU_INPUT_DRY_RUN=1` and mock Python/audio inputs; they do not
 - Hear uses the CPU `base` model; not a cloud/GPU transcription service.
 - The side panel needs `dsh-better-sidebar`.
 - VHCU is not a security sandbox; it runs with the current user's desktop permissions.
+- **Web version is unsupported:** the browser sandbox cannot spawn local Python or inject keyboard/mouse input; use the DSH Desktop App.
 - Real Blender/remote-desktop input behavior is environment-dependent and should be verified manually.
 
 ---
