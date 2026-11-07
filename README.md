@@ -416,4 +416,6 @@ Test suites use `VHCU_INPUT_DRY_RUN=1` and mock Python/audio inputs; they do not
 
 MIT. See [LICENSE](LICENSE).
 
+Third-party components and their licenses are listed in [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md).
+
 **VHCU is an independent community plugin and is not an official DeepSeek Harness component.**
