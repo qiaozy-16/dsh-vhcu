@@ -19,7 +19,7 @@ Local-first screen understanding, system-audio transcription, and safe Windows i
 > - **Required companion:** this plugin's UI is designed to work with **`dsh-better-sidebar`**. Install and enable it in the same DSH profile first. VHCU will not render a usable panel without a sidebar host.
 > - **Windows only:** screen capture uses Windows GDI/BitBlt, input uses `SendInput`, and Hear uses WASAPI loopback. macOS and Linux are not supported.
 > - **DSH version:** **0.2.1-rc.3 is recommended** (tested profile). The plugin declares compatibility for `0.2.0-rc.2`, `0.2.1-rc.2`, and `0.2.1-rc.3`.
-> - **This plugin can control your real mouse and keyboard.** Read the [Safety](#safety) section before enabling privacy bypass or automatic destructive-action approval.
+> - **This plugin can control your real mouse and keyboard.** Read the [Safety](#safety) section before using the privacy-shield override or automatic approval of sensitive operations.
 
 ---
 
@@ -70,16 +70,16 @@ It is intentionally **not** a cloud automation service. The only expected networ
 - variables such as `{{x}}` / `{{text}}`; optional image-to-physical coordinate scaling;
 - **100 steps** per macro, **20 macros** per queue;
 - built-in Blender/CAD-friendly **middle-button drag** (`MIDDLEDOWN` → 16-step interpolation → `MIDDLEUP`);
-- destructive macros (`is_destructive: true`) are **denied by default** until the user approves them in the panel;
-- optional unattended mode (`自动允许危险操作 (无人值守)`) can skip approval, with a permanent red warning banner;
+- sensitive-operation macros (`is_destructive: true`) are **denied by default** until the user approves them in the panel;
+- optional managed mode (`自动批准敏感宏（托管模式）`) can skip approval, with a permanent red warning banner;
 - Turbo mode allows `skip_readback: true` on click/hotkey/macro for fast consecutive actions, at the cost of visual verification.
 
 ### UI
 
 - Single sidebar panel with Vision / Action / Hear / Fusion tabs;
-- collapsible **常规设置**, **高级调试**, **危险区域** sections;
+- collapsible **常规设置**, **高级调试**, **高级设置** sections;
 - soft-pause banner: `👀 您正在接管键鼠，AI 已暂停` — real user input pauses AI injection and resumes 1.5 s after the user stops;
-- destructive-macro approval modal, no `window.confirm`;
+- sensitive-operation approval modal, no `window.confirm`;
 - recording strip with `🔴 开始录制宏` / `⏹ 停止并保存`.
 
 ---
@@ -251,7 +251,7 @@ VHCU is a real computer-use tool, not a sandbox. Treat every screen and every ac
 - Foreground-window titles are checked against a configurable blacklist (default includes password/login/banking terms).
 - On a blocked window, VHCU returns **`E_PRIVACY_BLOCKED`**, stores **no frame**, and invalidates any previous frame URL.
 - **No `vp_*` or external screenshot tool should be used as a fallback** during a privacy block. Stop and wait for the user.
-- `关闭隐私保护 (极高风险)` disables this protection and is gated by an explicit confirmation; leave it off unless you fully understand the risk.
+- `关闭隐私屏蔽（开发者模式）` disables this protection and is gated by an explicit confirmation; leave it off unless you fully understand the risk.
 
 ### Input guards
 
@@ -262,11 +262,11 @@ VHCU is a real computer-use tool, not a sandbox. Treat every screen and every ac
 - Rate limiting in both Node and Python.
 - Real user mouse/keyboard activity triggers a soft pause (`paused_by_user`); AI injection is filtered via `isAiInjecting`.
 
-### Destructive actions
+### Sensitive operations
 
 - Macros can be marked `is_destructive: true` (built-in `macro_close_active_window` is).
 - Default behavior: the panel asks for approval; deny returns `E_DENIED`.
-- Unattended mode skips the prompt only after an explicit confirmation and shows a persistent red banner.
+- Managed mode skips the prompt only after an explicit confirmation and shows a persistent red banner.
 - `alt+f4`, `ctrl+s`, and `delete` hotkeys require `confirm_destructive: true`.
 
 ### Prompt injection
@@ -342,7 +342,7 @@ Turbo mode (after enabling it in Settings):
 | `VHCU_IDLE_TIMEOUT_MS` | Override idle-watchdog timeout for demos/tests |
 | `HF_ENDPOINT` | Overridden to `https://hf-mirror.com` when downloading Hear models |
 
-Runtime settings (input method, Hear sensitivity, privacy blacklist, Turbo, unattended approval) are in the **⚙ Settings** panel and live in the plugin process; restarting DSH restores safe defaults for the dangerous switches.
+Runtime settings (input method, Hear sensitivity, privacy blacklist, Turbo, managed approval) are in the **⚙ Settings** panel and live in the plugin process; restarting DSH restores safe defaults for the sensitive switches.
 
 ---
 

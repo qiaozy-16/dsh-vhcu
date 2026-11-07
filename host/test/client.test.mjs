@@ -226,7 +226,7 @@ test('P22.2 privacy, raw Hear, reconnecting and 30-step UI are present', () => {
   const source = readFileSync(CLIENT, 'utf8');
   assert.match(source, /vhcu-privacy-banner/);
   assert.match(source, /隐私保护触发：AI 已暂停/);
-  assert.ok(source.includes('关闭隐私保护 (极高风险)'));
+  assert.ok(source.includes('关闭隐私屏蔽（开发者模式）'));
   assert.match(source, /确认开启/);
   assert.match(source, /显示原始转写 \(仅调试用\)/);
   assert.match(source, /reconnecting/);
@@ -234,8 +234,8 @@ test('P22.2 privacy, raw Hear, reconnecting and 30-step UI are present', () => {
   assert.match(source, /最多 100 步/);
   assert.match(source, /已达到 100 步上限/);
   assert.match(source, /privacyUnprotected/);
-  assert.match(source, /无保护裸奔模式/);
-  assert.match(source, /截图与键鼠均放行/);
+  assert.match(source, /关闭隐私屏蔽（开发者模式）/);
+  assert.match(source, /截图与键鼠按配置放行/);
   assert.match(source, /vhcu-unprotected-banner/);
 });
 
@@ -243,18 +243,18 @@ test('P23 soft pause banner and HITL approval modal are present', () => {
   const source = readFileSync(CLIENT, 'utf8');
   assert.match(source, /您正在接管键鼠，AI 已暂停/);
   assert.match(source, /interaction\?\.notice/);
-  assert.match(source, /AI 请求执行破坏性操作/);
+  assert.match(source, /AI 请求执行敏感操作/);
   assert.match(source, /vhcu-approval/);
   assert.match(source, /\/approval/);
   assert.match(source, /is_destructive/);
   assert.doesNotMatch(source, /window\.confirm/);
 });
 
-test('P23.1 auto-approve destructive macros has two-step confirmation and red banner', () => {
+test('P23.1 auto-approve sensitive-operation macros has two-step confirmation and red banner', () => {
   const source = readFileSync(CLIENT, 'utf8');
-  assert.ok(source.includes('自动允许危险操作 (无人值守)'));
-  assert.ok(source.includes('此操作将允许 AI 自动执行关闭、删除等操作，可能导致数据丢失'));
-  assert.ok(source.includes('⚠️ 自动批准破坏性宏已开启，请随时注意 AI 操作。'));
+  assert.ok(source.includes('自动批准敏感宏（托管模式）'));
+  assert.ok(source.includes('启用后 AI 执行关闭、删除等敏感操作宏时不再逐次弹窗'));
+  assert.ok(source.includes('⚠️ 自动批准敏感宏（托管模式）已开启，请保持任务在受控范围内。'));
   assert.match(source, /vhcu-autoapprove-banner/);
   assert.match(source, /autoApproveDestructive/);
   assert.match(source, /confirmAutoApprove/);
@@ -268,7 +268,7 @@ test('P24 Turbo mode setting and 100-step UI copy are present', () => {
   assert.match(source, /最多 100 步/);
   assert.match(source, /【常规设置】/);
   assert.match(source, /【高级调试】/);
-  assert.match(source, /【危险区域】/);
+  assert.match(source, /【高级设置】/);
   assert.match(source, /建议保持默认设置/);
 });
 
