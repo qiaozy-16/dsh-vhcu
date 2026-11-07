@@ -1,0 +1,16 @@
+{
+  "v": 1,
+  "seq": 3,
+  "type": "heartbeat",
+  "ts": 1793435000300,
+  "uptimeMs": 3200,
+  "frames": 40,
+  "diffs": 6,
+  "dropped": 0,
+  "fps": 5.9,
+  "queueDepth": 0,
+  "loopLagMs": 0.8,
+  "lastDiffMs": 1.4,
+  "rssBytes": 38289408,
+  "vision": "running"
+}

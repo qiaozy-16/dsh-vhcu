@@ -1,0 +1,8 @@
+{
+  "v": 1,
+  "seq": 9,
+  "type": "snapshot",
+  "ts": 1793435000400,
+  "asOfSeq": 8,
+  "values": { "vision": "running", "source": "fake", "fps": 6, "frames": 41 }
+}

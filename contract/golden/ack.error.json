@@ -1,0 +1,13 @@
+{
+  "v": 1,
+  "seq": 4,
+  "type": "ack",
+  "ts": 1793435000600,
+  "cmdId": "c-2",
+  "ok": false,
+  "error": {
+    "code": "E_STATE",
+    "message": "vision already running",
+    "hint": "先 vision.stop 再 start"
+  }
+}

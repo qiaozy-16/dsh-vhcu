@@ -1,0 +1,9 @@
+{
+  "v": 1,
+  "seq": 5,
+  "type": "error",
+  "ts": 1793435000700,
+  "code": "E_SEQ",
+  "message": "sequence gap: expected 4, got 7",
+  "fatal": false
+}

@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>VHCU 视觉 · dev harness</title>
+<style>
+  :root { color-scheme: dark; }
+  html, body { height: 100%; margin: 0; background: #070a0f; }
+  body { display: grid; place-items: center; font: 12px/1.5 "Segoe UI", system-ui, sans-serif; }
+  .frame { width: 380px; height: 560px; border: 1px solid #1e2530; border-radius: 10px; overflow: hidden;
+    box-shadow: 0 24px 80px rgba(0,0,0,.55); background: #0d1016; }
+  .root { display: flex; flex-direction: column; height: 100%; min-height: 0; background: #0d1016; color: #d7dee8; }
+  .head { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-bottom: 1px solid #1e2530; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: #5f6c80; color: #5f6c80; box-shadow: 0 0 8px currentColor; }
+  .title { font-weight: 600; letter-spacing: .02em; color: #e8eef7; }
+  .phase { color: #8b98a9; text-transform: uppercase; font-size: 10px; letter-spacing: .08em; }
+  .spacer { flex: 1; }
+  .btn { padding: 5px 12px; border-radius: 6px; border: 1px solid #2b3442; background: #161c25; color: #d7dee8;
+    cursor: pointer; font: inherit; }
+  .btn:hover:not(:disabled) { border-color: #4d6bfe; }
+  .btn:disabled { opacity: .45; cursor: default; }
+  .btn.on { border-color: #2f6b4f; background: #12251c; color: #9be3bd; }
+  .meta { display: flex; gap: 14px; padding: 6px 12px; color: #77859a; font-size: 11px;
+    border-bottom: 1px solid #141a22; white-space: nowrap; overflow: hidden; }
+  .meta b { color: #b9c6d8; font-weight: 500; }
+  .list { flex: 1; min-height: 0; overflow: auto; padding: 4px 0; }
+  .row { display: flex; gap: 8px; padding: 5px 12px; border-bottom: 1px solid #121821; }
+  .row:hover { background: #111722; }
+  .time { color: #5f6c80; font-variant-numeric: tabular-nums; flex: 0 0 auto; }
+  .text { color: #c6d2e2; overflow-wrap: anywhere; }
+  .row.warn .text { color: #f0c674; }
+  .row.error .text { color: #f28b82; }
+  .empty { padding: 24px 12px; color: #5f6c80; text-align: center; }
+  .foot { padding: 6px 12px; border-top: 1px solid #1e2530; color: #5f6c80; font-size: 10px; display: flex; gap: 10px; }
+  .list::-webkit-scrollbar { width: 8px; }
+  .list::-webkit-scrollbar-thumb { background: #232c3a; border-radius: 4px; }
+</style>
+</head>
+<body>
+<div class="frame">
+  <div class="root">
+    <div class="head">
+      <span class="dot" id="dot"></span>
+      <span class="title">VHCU 视觉</span>
+      <span class="phase" id="phase">已停止</span>
+      <span class="spacer"></span>
+      <button class="btn" id="toggle" type="button">开启视觉</button>
+    </div>
+    <div class="meta">
+      <span>源 <b id="source">—</b></span>
+      <span>pid <b id="pid">—</b></span>
+      <span>帧 <b id="frames">0</b></span>
+      <span>变化 <b id="diffs">0</b></span>
+      <span>fps <b id="fps">—</b></span>
+    </div>
+    <div class="list" id="list"><div class="empty">还没有事件。点击右上角「开启视觉」开始监控。</div></div>
+    <div class="foot"><span id="link">SSE connecting</span><span id="note">按需唤醒 · 不空转</span></div>
+  </div>
+</div>
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const DOT = { idle: '#5f6c80', starting: '#f0c674', running: '#4ade80', stopping: '#f0c674', error: '#f28b82' };
+  const PHASE = { idle: '已停止', starting: '启动中', running: '运行中', stopping: '停止中', error: '异常' };
+  const list = $('list');
+  const seen = new Set();
+  let state = { phase: 'idle', running: false, counters: { frames: 0, diffs: 0 } };
+  let busy = false;
+
+  function clock(ts) {
+    return new Date(ts || Date.now()).toLocaleTimeString('zh-CN', { hour12: false });
+  }
+
+  function row(entry) {
+    const el = document.createElement('div');
+    el.className = 'row ' + (entry.level || 'info');
+    const time = document.createElement('span');
+    time.className = 'time';
+    time.textContent = clock(entry.ts);
+    const text = document.createElement('span');
+    text.className = 'text';
+    text.textContent = entry.text || entry.kind || '';
+    el.append(time, text);
+    return el;
+  }
+
+  function addEvent(entry) {
+    if (entry.id != null) {
+      if (seen.has(entry.id)) return;
+      seen.add(entry.id);
+    }
+    const empty = list.querySelector('.empty');
+    if (empty) empty.remove();
+    list.prepend(row(entry));
+    while (list.children.length > 200) list.lastElementChild.remove();
+  }
+
+  function render() {
+    $('dot').style.background = DOT[state.phase] || DOT.idle;
+    $('dot').style.color = DOT[state.phase] || DOT.idle;
+    $('phase').textContent = PHASE[state.phase] || state.phase;
+    $('source').textContent = state.source || '—';
+    $('pid').textContent = state.pid || '—';
+    $('frames').textContent = state.counters?.frames ?? 0;
+    $('diffs').textContent = state.counters?.diffs ?? 0;
+    $('fps').textContent = state.fps ?? '—';
+    const button = $('toggle');
+    button.textContent = busy ? '处理中…' : state.running ? '关闭视觉' : '开启视觉';
+    button.disabled = busy || state.phase === 'starting' || state.phase === 'stopping';
+    button.classList.toggle('on', Boolean(state.running));
+  }
+
+  async function toggle() {
+    if (busy) return;
+    const action = state.running ? 'stop' : 'start';
+    busy = true;
+    render();
+    try {
+      const response = await fetch('/vhcu/control', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-vhcu': '1' },
+        body: JSON.stringify({ action }),
+      });
+      const payload = await response.json();
+      if (!payload.ok) {
+        addEvent({ ts: Date.now(), level: 'error', text: '⚠ ' + (payload.error?.hint || payload.error?.message || response.status) });
+      } else if (payload.state) {
+        state = payload.state;
+      }
+    } catch (error) {
+      addEvent({ ts: Date.now(), level: 'error', text: '⚠ ' + error.message });
+    } finally {
+      busy = false;
+      render();
+    }
+  }
+
+  $('toggle').addEventListener('click', toggle);
+
+  fetch('/vhcu/state').then((r) => r.json()).then((payload) => {
+    if (!payload?.ok) return;
+    state = payload.state || state;
+    (payload.events || []).forEach(addEvent);
+    render();
+  }).catch(() => { $('link').textContent = 'SSE offline'; });
+
+  const source = new EventSource('/vhcu/events');
+  source.onopen = () => { $('link').textContent = 'SSE live'; };
+  source.onerror = () => { $('link').textContent = 'SSE retry'; };
+  source.addEventListener('hello', (message) => {
+    try {
+      const payload = JSON.parse(message.data);
+      state = payload.state || state;
+      (payload.events || []).forEach(addEvent);
+      render();
+      $('link').textContent = 'SSE live';
+    } catch {}
+  });
+  source.addEventListener('status', (message) => {
+    try { state = JSON.parse(message.data); render(); } catch {}
+  });
+  source.addEventListener('event', (message) => {
+    try { addEvent(JSON.parse(message.data)); } catch {}
+  });
+
+  render();
+})();
+</script>
+</body>
+</html>

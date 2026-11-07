@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "vhcu:error:v1",
+  "title": "Protocol-level error (either direction)",
+  "allOf": [
+    { "$ref": "vhcu:envelope:v1" },
+    {
+      "type": "object",
+      "required": ["type", "code", "message", "fatal"],
+      "properties": {
+        "type": { "const": "error" },
+        "code": {
+          "enum": [
+            "E_PROTO",
+            "E_TIMEOUT",
+            "E_BUSY",
+            "E_DENIED",
+            "E_UNAVAILABLE",
+            "E_STATE",
+            "E_CAPTURE",
+            "E_PRIVACY_BLOCKED",
+            "E_INTERNAL",
+            "E_SEQ",
+            "E_VERSION",
+            "E_SHUTDOWN",
+            "E_CONFIRM_REQUIRED"
+          ]
+        },
+        "message": { "type": "string", "minLength": 1 },
+        "hint": { "type": "string" },
+        "fatal": { "type": "boolean" }
+      }
+    }
+  ]
+}

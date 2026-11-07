@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "vhcu:shutdown:v1",
+  "title": "Shutdown request (host -> daemon)",
+  "allOf": [
+    { "$ref": "vhcu:envelope:v1" },
+    {
+      "type": "object",
+      "required": ["type"],
+      "properties": {
+        "type": { "const": "shutdown" },
+        "reason": { "type": "string", "minLength": 1 }
+      }
+    }
+  ]
+}

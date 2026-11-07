@@ -1,0 +1,9 @@
+{
+  "v": 1,
+  "seq": 2,
+  "type": "ack",
+  "ts": 1793435000500,
+  "cmdId": "c-1",
+  "ok": true,
+  "result": { "source": "fake", "fps": 6 }
+}

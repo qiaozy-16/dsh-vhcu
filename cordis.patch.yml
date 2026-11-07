@@ -1,0 +1,12 @@
+# dsh-vhcu bundle patch.
+#
+# Installed through the profile's `dsh.profile.bundles` list (see
+# scripts/install.mjs) or by adding this row to the profile's own
+# cordis.patch.yml by hand. The patch only INSERTS one row; it never replaces
+# or disables core rows.
+#
+# id:    stable row id (used for overrides in later layers)
+# name:  npm package name resolved from the profile's node_modules
+- insert:
+    - id: vhcu
+      name: 'dsh-vhcu'

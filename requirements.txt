@@ -1,0 +1,9 @@
+# dsh-vhcu — Python runtime dependencies (Windows)
+#
+# Screen capture (BitBlt / mss)
+mss>=10.0.0
+# Hear: array math, WASAPI loopback, WebRTC VAD, local faster-whisper
+numpy>=1.26
+soundcard>=0.4.3
+webrtcvad-wheels>=2.0.14
+faster-whisper>=1.2.0

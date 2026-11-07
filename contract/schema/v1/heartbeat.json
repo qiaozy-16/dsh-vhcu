@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "vhcu:heartbeat:v1",
+  "title": "Daemon heartbeat (daemon -> host)",
+  "description": "One per second while the daemon is alive, even when vision is stopped. Three consecutive misses let the host declare the child dead without waiting for exit.",
+  "allOf": [
+    { "$ref": "vhcu:envelope:v1" },
+    {
+      "type": "object",
+      "required": ["type", "uptimeMs", "frames", "dropped", "fps", "queueDepth"],
+      "properties": {
+        "type": { "const": "heartbeat" },
+        "uptimeMs": { "type": "integer", "minimum": 0 },
+        "frames": { "type": "integer", "minimum": 0 },
+        "diffs": { "type": "integer", "minimum": 0 },
+        "dropped": { "type": "integer", "minimum": 0 },
+        "fps": { "type": "number", "minimum": 0, "maximum": 120 },
+        "queueDepth": { "type": "integer", "minimum": 0 },
+        "loopLagMs": { "type": "number", "minimum": 0 },
+        "lastDiffMs": { "type": "number", "minimum": 0 },
+        "rssBytes": { "type": ["integer", "null"], "minimum": 0 },
+        "vision": { "enum": ["stopped", "starting", "running", "stopping"] }
+      }
+    }
+  ]
+}

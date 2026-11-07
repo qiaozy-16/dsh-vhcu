@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "vhcu:cmd:v1",
+  "title": "VHCU command (host -> daemon)",
+  "allOf": [
+    { "$ref": "vhcu:envelope:v1" },
+    {
+      "type": "object",
+      "required": ["type", "id", "op"],
+      "properties": {
+        "type": { "const": "cmd" },
+        "op": {
+          "enum": [
+            "ping",
+            "sys.info",
+            "sys.active_window",
+            "vision.start",
+            "vision.stop",
+            "vision.status",
+            "vision.configure",
+            "vision.snapshot",
+            "vision.capture",
+            "input.click",
+            "input.type",
+            "input.hotkey",
+            "input.scroll",
+            "input.drag",
+            "input.macro.open_notepad",
+            "input.macro.save",
+            "input.macro.run",
+            "hear.start",
+            "hear.stop",
+            "hear.status",
+            "hear.configure",
+            "shutdown"
+          ]
+        },
+        "args": { "type": "object" },
+        "deadlineMs": { "type": "integer", "minimum": 1, "maximum": 60000 }
+      }
+    }
+  ]
+}

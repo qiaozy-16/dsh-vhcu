@@ -1,0 +1,12 @@
+{
+  "v": 1,
+  "seq": 7,
+  "type": "event",
+  "ts": 1793435000200,
+  "kind": "vision.diff",
+  "screen": { "width": 320, "height": 180, "scale": 1 },
+  "rois": [
+    { "id": 1, "x": 96, "y": 48, "w": 32, "h": 32, "score": 0.42, "hash": "9f3c1a2b" }
+  ],
+  "stats": { "frame": 12, "captureMs": 0.4, "diffMs": 1.2, "changedCells": 12, "cellTotal": 400 }
+}

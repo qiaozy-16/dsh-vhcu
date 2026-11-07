@@ -1,0 +1,11 @@
+{
+  "v": 1,
+  "seq": 0,
+  "type": "heartbeat",
+  "ts": 1793435000800,
+  "uptimeMs": 0,
+  "frames": 0,
+  "dropped": 0,
+  "fps": 0,
+  "queueDepth": 0
+}

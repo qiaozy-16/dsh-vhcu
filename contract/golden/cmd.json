@@ -1,0 +1,10 @@
+{
+  "v": 1,
+  "seq": 1,
+  "type": "cmd",
+  "ts": 1793435000100,
+  "id": "c-1",
+  "op": "vision.start",
+  "args": { "source": "fake", "fps": 6 },
+  "deadlineMs": 3000
+}

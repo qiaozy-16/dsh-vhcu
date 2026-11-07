@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "vhcu:envelope:v1",
+  "title": "VHCU frame envelope v1",
+  "description": "Every line on the stdio control plane is one JSON object with this envelope. seq is monotonic per sender; receivers must reject a zero/negative seq and report a gap.",
+  "type": "object",
+  "required": ["v", "seq", "type", "ts"],
+  "properties": {
+    "v": { "const": 1 },
+    "seq": { "type": "integer", "minimum": 1 },
+    "type": {
+      "enum": ["ready", "cmd", "ack", "event", "heartbeat", "error", "snapshot", "shutdown"]
+    },
+    "ts": { "type": "integer", "minimum": 0 },
+    "id": { "type": "string", "minLength": 1, "maxLength": 64 }
+  },
+  "additionalProperties": true
+}

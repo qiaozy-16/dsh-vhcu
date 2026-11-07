@@ -1,0 +1,13 @@
+{
+  "v": 1,
+  "seq": 1,
+  "type": "ready",
+  "ts": 1793435000000,
+  "proto": 1,
+  "pid": 4242,
+  "port": 51823,
+  "token": "6f0f0d0c0b0a09080706050403020100",
+  "capabilities": { "vision": true, "sources": ["fake"], "maxFps": 15 },
+  "python": { "version": "3.13.9", "executable": "python.exe", "deps": { "mss": false } },
+  "startedAt": 1793435000000
+}

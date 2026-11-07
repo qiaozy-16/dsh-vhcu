@@ -1,0 +1,48 @@
+# ── Dependencies ────────────────────────────────────────────────
+node_modules/
+
+# ── Model artifacts (download separately; never commit) ────────
+models/
+**/models/
+*.bin
+*.onnx
+*.pt
+*.safetensors
+
+# ── Private runtime state ───────────────────────────────────────
+macros.json
+**/macros.json
+
+# ── Backups / logs / temp ───────────────────────────────────────
+*.bak
+*.log
+*.tmp
+logs/
+.artifacts/
+
+# ── Python ──────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ── Build / packaging ───────────────────────────────────────────
+dist/
+build/
+*.zip
+
+# ── Local secrets / environment ─────────────────────────────────
+.env
+.env.*
+!.env.example
+
+# ── OS / editor noise ───────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/

@@ -1,0 +1,109 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "vhcu:event:v1",
+  "title": "Daemon event (daemon -> host)",
+  "description": "Events are incremental. vision.diff is latest-wins and may be dropped under backpressure; vision.started/stopped and errors must not be dropped.",
+  "allOf": [
+    { "$ref": "vhcu:envelope:v1" },
+    {
+      "type": "object",
+      "required": ["type", "kind"],
+      "properties": {
+        "type": { "const": "event" },
+        "kind": {
+          "enum": [
+            "vision.started",
+            "vision.stopped",
+            "vision.diff",
+            "vision.status",
+            "vision.blocked",
+            "daemon.log",
+            "daemon.bye",
+            "hear.status",
+            "hear.text",
+            "hear.audio"
+          ]
+        }
+      }
+    },
+    {
+      "oneOf": [
+        {
+          "properties": { "kind": { "const": "vision.diff" } },
+          "required": ["screen", "rois", "stats"]
+        },
+        {
+          "properties": { "kind": { "const": "vision.started" } },
+          "required": ["source", "fps"]
+        },
+        {
+          "properties": { "kind": { "const": "vision.stopped" } },
+          "required": ["reason"]
+        },
+        {
+          "properties": {
+            "kind": { "enum": ["vision.status", "daemon.log", "daemon.bye"] }
+          }
+        },
+        {
+          "properties": { "kind": { "const": "vision.blocked" } },
+          "required": ["blocked"]
+        },
+        {
+          "properties": { "kind": { "const": "hear.status" } },
+          "required": ["status"]
+        },
+        {
+          "properties": { "kind": { "const": "hear.text" } },
+          "required": ["text"]
+        },
+        {
+          "properties": { "kind": { "const": "hear.audio" } },
+          "required": ["rms"]
+        }
+      ]
+    }
+  ],
+  "properties": {
+    "source": { "enum": ["fake", "mss"] },
+    "fps": { "type": "number", "minimum": 0, "maximum": 120 },
+    "reason": { "type": "string", "minLength": 1 },
+    "screen": {
+      "type": "object",
+      "required": ["width", "height", "scale"],
+      "properties": {
+        "width": { "type": "integer", "minimum": 1 },
+        "height": { "type": "integer", "minimum": 1 },
+        "scale": { "type": "number", "minimum": 0.25, "maximum": 4 }
+      }
+    },
+    "rois": {
+      "type": "array",
+      "maxItems": 8,
+      "items": {
+        "type": "object",
+        "required": ["id", "x", "y", "w", "h", "score", "hash"],
+        "properties": {
+          "id": { "type": "integer", "minimum": 1 },
+          "x": { "type": "integer", "minimum": 0 },
+          "y": { "type": "integer", "minimum": 0 },
+          "w": { "type": "integer", "minimum": 1 },
+          "h": { "type": "integer", "minimum": 1 },
+          "score": { "type": "number", "minimum": 0, "maximum": 1 },
+          "hash": { "type": "string", "minLength": 8, "maxLength": 32 }
+        }
+      }
+    },
+    "stats": {
+      "type": "object",
+      "required": ["frame", "captureMs", "diffMs"],
+      "properties": {
+        "frame": { "type": "integer", "minimum": 0 },
+        "captureMs": { "type": "number", "minimum": 0 },
+        "diffMs": { "type": "number", "minimum": 0 },
+        "changedCells": { "type": "integer", "minimum": 0 },
+        "cellTotal": { "type": "integer", "minimum": 0 }
+      }
+    }
+  }
+}

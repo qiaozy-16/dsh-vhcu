@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "vhcu:ack:v1",
+  "title": "Command acknowledgement (daemon -> host)",
+  "allOf": [
+    { "$ref": "vhcu:envelope:v1" },
+    {
+      "type": "object",
+      "required": ["type", "cmdId", "ok"],
+      "properties": {
+        "type": { "const": "ack" },
+        "cmdId": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "ok": { "type": "boolean" },
+        "result": { "type": "object" },
+        "error": {
+          "type": "object",
+          "required": ["code", "message"],
+          "properties": {
+            "code": {
+              "enum": [
+                "E_PROTO",
+                "E_TIMEOUT",
+                "E_BUSY",
+                "E_DENIED",
+                "E_UNAVAILABLE",
+                "E_STATE",
+                "E_CAPTURE",
+                "E_PRIVACY_BLOCKED",
+                "E_INTERNAL",
+                "E_SEQ",
+                "E_VERSION",
+                "E_SHUTDOWN"
+              ]
+            },
+            "message": { "type": "string", "minLength": 1 },
+            "hint": { "type": "string" },
+            "fatal": { "type": "boolean" }
+          }
+        }
+      }
+    }
+  ]
+}

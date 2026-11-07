@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "vhcu:snapshot:v1",
+  "title": "State snapshot (daemon -> host)",
+  "description": "Full state at asOfSeq. The host merges values by key (incremental semantics), matching DSH's sequenced projection contract: a missing key keeps its previous value.",
+  "allOf": [
+    { "$ref": "vhcu:envelope:v1" },
+    {
+      "type": "object",
+      "required": ["type", "asOfSeq", "values"],
+      "properties": {
+        "type": { "const": "snapshot" },
+        "asOfSeq": { "type": "integer", "minimum": 0 },
+        "values": { "type": "object" }
+      }
+    }
+  ]
+}

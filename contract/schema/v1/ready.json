@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "vhcu:ready:v1",
+  "title": "Daemon ready (daemon -> host)",
+  "description": "Emitted exactly once per daemon process, after the protocol channel is redirected and before any command is accepted. port/token are the image plane credentials.",
+  "allOf": [
+    { "$ref": "vhcu:envelope:v1" },
+    {
+      "type": "object",
+      "required": ["type", "proto", "pid", "port", "token", "capabilities"],
+      "properties": {
+        "type": { "const": "ready" },
+        "proto": { "const": 1 },
+        "pid": { "type": "integer", "minimum": 1 },
+        "port": { "type": "integer", "minimum": 0, "maximum": 65535 },
+        "token": { "type": "string", "minLength": 16, "maxLength": 256 },
+        "capabilities": {
+          "type": "object",
+          "required": ["vision", "sources", "maxFps"],
+          "properties": {
+            "vision": { "type": "boolean" },
+            "sources": {
+              "type": "array",
+              "items": { "enum": ["fake", "mss"] },
+              "minItems": 1,
+              "uniqueItems": true
+            },
+            "maxFps": { "type": "integer", "minimum": 1, "maximum": 120 }
+          }
+        },
+        "python": {
+          "type": "object",
+          "properties": {
+            "version": { "type": "string" },
+            "executable": { "type": "string" },
+            "deps": { "type": "object" }
+          }
+        },
+        "startedAt": { "type": "integer", "minimum": 0 }
+      }
+    }
+  ]
+}
