@@ -1,0 +1,140 @@
+DSH-VHCU  P12.2.1-01  Hear 模型下载强制国内 HF 镜像
+生成时间：2026-11-01 12:44 (Asia/Shanghai)
+阶段：P12.2.1（修复国内访问 Hugging Face 极慢导致「模型加载中」长时间卡住）
+前置：P12.2 Hear UI/独立生命周期完成
+
+====================================================================
+0. 结论（先看这 5 条）
+====================================================================
+C1. hear.py 在导入 faster_whisper / huggingface_hub **之前** 强制设置
+    os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"。
+C2. 初始化 WhisperModel 前再次调用 force_hf_mirror()，并修正已导入的
+    huggingface_hub.constants.ENDPOINT（避免常量在 import 时已固化）。
+C3. Hear status 增加 hfEndpoint；loading 状态消息包含 HF_ENDPOINT 与模型目录。
+C4. UI loading 提示改为“首次运行会通过 hf-mirror.com 下载 base 模型…”。
+C5. 备份：vision/vhcu_daemon/hear.py.bak；测试 Node 45/45、Python 53/53。
+    ⚠️ 镜像实际下载速度/连通性未在本机验证（依赖仍未安装）。
+
+====================================================================
+1. 问题原因
+====================================================================
+  faster-whisper 首次加载会通过 huggingface_hub 从
+  https://huggingface.co 下载 base 模型。国内直连经常长时间超时，
+  HuggingFace 默认超时/重试策略会把界面卡在 loading。
+  仅设置环境变量还不够：huggingface_hub 在 import 时会把 HF_ENDPOINT
+  读入 constants.ENDPOINT；若在 import 之后才设置，部分下载路径仍用旧值。
+
+====================================================================
+2. 修改（vision/vhcu_daemon/hear.py）
+====================================================================
+2.1 模块级强制（最早时机）
+    HF_MIRROR = "https://hf-mirror.com"
+    os.environ["HF_ENDPOINT"] = HF_MIRROR
+    # 位于 faster_whisper/huggingface_hub 的 import 之前
+
+2.2 force_hf_mirror()
+    def force_hf_mirror() -> str:
+        os.environ["HF_ENDPOINT"] = HF_MIRROR
+        try:
+            import huggingface_hub.constants as constants
+            constants.ENDPOINT = HF_MIRROR
+            if hasattr(constants, "HF_ENDPOINT"):
+                constants.HF_ENDPOINT = HF_MIRROR
+        except Exception:
+            pass
+        return HF_MIRROR
+
+2.3 调用点
+    - _import_dependencies() 开头：force_hf_mirror()
+      （确保 import faster_whisper 前环境已就绪）
+    - _run() 中、WhisperModel(...) 之前：endpoint = force_hf_mirror()
+      （覆盖已 import 的情况），loading 消息：
+        "加载 faster-whisper base（HF_ENDPOINT=https://hf-mirror.com,
+         download_root=...）"
+2.4 status
+    HearService.status() 增加 hfEndpoint: "https://hf-mirror.com"。
+2.5 模型路径保持不变
+    VHCU_MODEL_PATH 优先；否则 <plugin>/models（D 盘插件目录）。
+    download_root 不变，镜像只改变下载源，不改变落盘位置。
+
+====================================================================
+3. UI（lib/client.js）
+====================================================================
+  Hear loading 提示文案：
+    “首次运行会通过 hf-mirror.com 下载 base 模型到插件目录 models/，请稍候”
+  其余按钮/状态灯/独立生命周期逻辑不变。
+
+====================================================================
+4. 测试
+====================================================================
+Node 45/45：无逻辑改动，Hear UI/control 用例保持通过。
+Python 53/53，新增：
+  test_hf_endpoint_is_forced_to_mirror：
+    - 先把 HF_ENDPOINT 设为 https://huggingface.co；
+    - force_hf_mirror() 返回并写回 https://hf-mirror.com；
+    - HearService.status().hfEndpoint == https://hf-mirror.com。
+未验证（如实记录）：
+  - 本机未安装 soundcard/webrtcvad/faster-whisper，未实际从镜像下载模型；
+  - 需要安装依赖后按第 5 节验证下载速度与模型落盘。
+
+====================================================================
+5. 重启验证
+====================================================================
+5.1 安装依赖（若未装）
+  py -3 -m pip install soundcard webrtcvad-wheels faster-whisper
+5.2 重启
+  完全退出 DSH（确认 Electron/python.exe 无残留）→ 重开 → 新会话。
+  日志：
+    dsh-vhcu: mounted (routes /vhcu/state|events|control|frame|settings|macros)
+    dsh-vhcu: registered 16 tools
+5.3 开启 Hear
+  VHCU → [H] Hear → 「开启听觉」。
+  预期 loading 提示包含 hf-mirror.com；下载应明显快于直连 HF。
+5.4 检查落盘
+  <local-path>
+  下应出现 faster-whisper 的 base 模型目录/文件；
+  <local-path> 不应新增模型。
+5.5 检查状态
+  vhcu_start_hear 返回 / hear.status 的 hfEndpoint 应为 https://hf-mirror.com；
+  loading 消息包含 HF_ENDPOINT=https://hf-mirror.com。
+5.6 若仍慢
+  - 镜像本身也可能被网络限制；可尝试在浏览器/命令行访问 https://hf-mirror.com 测试；
+  - 或预先手动把 base 模型放到 VHCU_MODEL_PATH 指定目录；
+  - 或在 shell 里覆盖 HF_ENDPOINT 后重启（代码会强制改回 hf-mirror.com，
+    如需自定义镜像请改 hear.py 的 HF_MIRROR 常量）。
+5.7 清理半成品
+  若之前卡在下载，models 下可能有 .incomplete 文件；
+  huggingface_hub 支持断点续传，一般无需手动删除；异常时可清空 models 后重试。
+
+====================================================================
+6. 文件改动
+====================================================================
+【新增】
+  VHCU-P12.2.1-01-HF镜像修复-20261101-1244.txt（本报告）
+【修改】
+  vision/vhcu_daemon/hear.py   HF_MIRROR/force_hf_mirror；import 前设置；
+                               WhisperModel 前再次设置；status.hfEndpoint；
+                               loading 消息
+  vision/tests/test_hear.py    镜像强制测试
+  lib/client.js                loading 文案显示 hf-mirror.com
+  package.json / dsh.plugin.json  0.16.1
+  README.md                    P12.2.1 镜像说明/测试数
+【备份】
+  vision/vhcu_daemon/hear.py.bak（修改前）
+  package.json.bak / dsh.plugin.json.bak / README.md.bak
+
+====================================================================
+7. 已知边界与下一步
+====================================================================
+R1. hf-mirror.com 的可用性依赖网络环境；代码强制该地址，不提供运行时切换。
+R2. 只对 huggingface_hub 下载生效；faster-whisper 若使用其他下载后端不适用。
+R3. 真实下载速度未验证；模型落盘路径不变（VHCU_MODEL_PATH / 插件 models）。
+R4. 国内网络若仍失败，建议离线放置模型或换网络。
+
+P12.3 建议：
+  N1. 可配置 HF 镜像（VHCU_HF_ENDPOINT）；
+  N2. 下载进度/大小可视化；
+  N3. 离线模型校验与一键导入；
+  N4. Hear 设备选择/语言配置。
+
+（报告完）

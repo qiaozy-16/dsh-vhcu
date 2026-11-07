@@ -1,0 +1,164 @@
+DSH-VHCU  P25-01  开源发布打包与清理
+生成时间：2026-11-07 13:45 (Asia/Shanghai)
+阶段：P25（最终发布准备）
+范围：删除 .bak、requirements/.gitignore/README/LICENSE、路径脱敏、发布清单。
+版本：1.0.0
+
+====================================================================
+1. 时间 / 阶段 / 范围
+====================================================================
+  时间：2026-11-07 13:45 +08:00
+  阶段：P25
+  目标：
+    1. 安全清理项目内所有 *.bak（排除 node_modules/、models/）；
+    2. 生成开源发布必备文件；
+    3. 全局检查 lib/ 与 vision/ 的本地绝对路径残留；
+    4. 输出最终《开源发布清单》。
+
+====================================================================
+2. 本轮交付物
+====================================================================
+2.1 备份清理
+    - 扫描范围：dsh-vhcu 项目根目录；
+    - 排除：node_modules/、models/；
+    - 删除 33 个 *.bak（README、lib、host、vision、contract 等）；
+    - 删除后再次扫描：0 个 *.bak（排除目录外）；
+    - 仅删除后缀 .bak，源码/配置/测试/模型均未删除。
+2.2 requirements.txt
+    新增 Windows Python 运行时依赖：
+      - mss>=10.0.0（截屏）
+      - numpy>=1.26（图像/音频数组）
+      - soundcard>=0.4.3（WASAPI loopback）
+      - webrtcvad-wheels>=2.0.14（VAD）
+      - faster-whisper>=1.2.0（本地转写）
+2.3 .gitignore
+    严格排除：
+      - node_modules/
+      - models/（含嵌套 models/）
+      - macros.json（含嵌套）
+      - *.bak、*.log、*.tmp、logs/
+      - Python 缓存/venv/pytest/mypy/ruff 缓存
+      - dist/build/*.zip、.artifacts/
+      - .env/.env.*、操作系统/编辑器噪声
+    保留 .env.example（如未来添加）。
+2.4 README.md
+    已重写为发布级 README：
+      - 顶部醒目前置条件：
+        - 必须配合 dsh-better-sidebar；
+        - 仅支持 Windows 10/11；
+        - DSH 推荐 0.2.1-rc.3；
+        - 明确真实键鼠控制风险。
+      - 架构、特性、24 工具分组、宏 JSON、配置项。
+      - 安装：
+        - git clone / npm install；
+        - venv + pip install -r requirements.txt；
+        - VHCU_PYTHON 设置；
+        - scripts/install.mjs 安装到 DSH profile；
+        - 重启 DSH。
+      - Hear 模型：
+        - Releases 离线包（推荐）；
+        - HF 镜像自动下载；
+        - VHCU_MODEL_PATH 覆盖。
+      - 安全：隐私硬拦截、焦点/坐标/回读守卫、HITL、提示词注入防护。
+      - 一张 Mermaid 架构图（DSH → sidebar → Node → Python → mss/SendInput/Hear）。
+      - 项目结构、开发测试、Troubleshooting、限制、MIT。
+2.5 LICENSE
+    新增 MIT License，版权行：
+      Copyright (c) 2026 dsh-vhcu contributors
+2.6 版本与兼容
+    - package.json / dsh.plugin.json / package-lock.json：1.0.0；
+    - dsh.plugin.json compatibility 增加 0.2.1-rc.3；
+    - README badge 版本更新为 1.0.0。
+2.7 发布清单
+    新增 OPEN_SOURCE_RELEASE_CHECKLIST.md：
+      - 清理结果；
+      - 必备文件；
+      - 路径脱敏结果；
+      - 测试结果；
+      - 不应提交的文件；
+      - GitHub 发布前待办与命令。
+
+====================================================================
+3. 证据
+====================================================================
+3.1 清理证据
+    清理前扫描到 33 个 .bak；
+    逐项断言 suffix=.bak 且不在 node_modules/models 后 unlink；
+    清理后：
+      find . -path './node_modules' -prune -o -path './models' -prune \
+        -o -type f -name '*.bak' -print
+    输出为空。
+3.2 路径脱敏证据
+    扫描命令：
+      grep -RInE '[A-Za-z]:[\\/]+Users[\\/]+<user>|/Users/<user>|<local-path>' \
+        lib vision --exclude-dir=__pycache__ --exclude='*.bak'
+    结果：无匹配。
+    清理了 hear.py 中唯一一处 <local-path> 注释，
+    改为 <repo>/models。
+    测试中的 <local-path> 仅为合成测试夹具/示例，不是用户路径。
+3.3 文件校验
+    .gitignore 48 行；
+    requirements.txt 5 个依赖；
+    package.json / dsh.plugin.json / package-lock.json 均为合法 JSON；
+    版本均为 1.0.0；
+    README 包含 dsh-better-sidebar、Windows、0.2.1-rc.3、
+    npm install、pip install -r、faster-whisper-base、Mermaid。
+3.4 测试
+    Node 97/97；
+    Python 100/100；
+    测试在清理和文档改动后重新跑通。
+3.5 未实测
+    - 干净 venv 中 pip install -r requirements.txt 的完整解析；
+    - GitHub Release 模型离线包的下载/解压/加载；
+    - 从全新 profile 安装 dsh-better-sidebar + VHCU 的端到端；
+    - git init/commit/tag/push 后的 GitHub Actions（未配置 CI）。
+
+====================================================================
+4. 风险与未验证项
+====================================================================
+R1. requirements.txt 使用下限版本，未锁定精确版本；干净环境解析未实测。
+R2. models/ 约 142MB，不能提交；必须通过 Release 资产分发。
+R3. README 中 `git clone <repository-url>` 仍是占位符，需用户替换真实 URL。
+R4. dsh-better-sidebar 的实际安装方式/链接需发布前确认。
+R5. MIT 版权人默认写为 “dsh-vhcu contributors”，用户可按需修改。
+R6. 生产代码无用户绝对路径；测试夹具中的 <local-path> 路径为合成值。
+R7. 当前目录不是 Git 仓库，尚未 git init/commit/tag。
+R8. 未配置 CI、Release workflow 或自动打包。
+
+====================================================================
+5. 待确认决策（编号）
+====================================================================
+D1. 删除项目内 33 个 .bak，保留 node_modules/models 内文件。
+D2. Python 依赖为 mss/numpy/soundcard/webrtcvad-wheels/faster-whisper。
+D3. README 按“必须 dsh-better-sidebar + Windows + DSH 0.2.1-rc.3”编写。
+D4. 模型分发采用 Releases 离线包优先，HF 镜像自动下载兜底。
+D5. 发布版本定为 1.0.0。
+D6. 许可证采用 MIT。
+D7. 不提交 models/node_modules/macros.json/*.bak。
+
+====================================================================
+6. 下一步计划 / 发布操作
+====================================================================
+N1. 替换 README 中 `<repository-url>` 为真实 GitHub 地址。
+N2. 确认 dsh-better-sidebar 的安装说明/链接。
+N3. 可选：用干净 Python 环境执行一次：
+       py -3 -m venv .venv-clean
+       .\.venv-clean\Scripts\Activate.ps1
+       python -m pip install -r requirements.txt
+N4. GitHub：
+       git init
+       git add .
+       git status
+       git commit -m "release: VHCU v1.0.0"
+       git branch -M main
+       git remote add origin <repository-url>
+       git push -u origin main
+       git tag v1.0.0
+       git push origin v1.0.0
+N5. 上传 faster-whisper-base.zip 到 Releases。
+N6. 发布前再次确认：
+       git ls-files | Select-String 'models/|node_modules/|macros\.json|\.bak$'
+     应无输出。
+N7. 建议补充 1-2 张截图/GIF（可选）。
+
+（报告完）

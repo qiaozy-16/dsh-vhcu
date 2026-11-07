@@ -1,0 +1,180 @@
+DSH-VHCU  P14.2-01  隐私窗口黑名单 + 多屏坐标钳制
+生成时间：2026-11-01 15:23 (Asia/Shanghai)
+阶段：P14 第二波排雷（隐私与多屏兼容）
+前置：P14 第一波空闲休眠/破坏键确认完成
+
+====================================================================
+0. 结论（先看这 6 条）
+====================================================================
+C1. 截屏前读取活动窗口标题；命中隐私黑名单（密码/银行/隐私/
+    Password/Login/私人 等）时暂停视觉抓取，不截图、不发送 ROI。
+C2. 命中时推送 `vision.blocked` 事件：
+      “检测到敏感窗口，已暂停视觉抓取”
+    离开敏感窗口后推送恢复事件。
+C3. 黑名单在 ⚙ 设置中可编辑（逗号分隔），保存后通过
+    `vision.configure` 热更新，不必重启视觉。
+C4. `vhcu_get_full_frame` 在敏感窗口下返回 E_DENIED，绝不泄漏截图。
+C5. 所有 click/drag/macro 坐标统一 `clamp_click` 到主屏
+    `[0,width-1] × [0,height-1]`；越界返回
+    warning: "坐标越界，已修正"。
+C6. 测试：Node 50/50、Python 70/70。
+    新增隐私匹配/恢复、settings 清洗、坐标钳制、vision.blocked 契约。
+
+====================================================================
+1. 隐私黑名单
+====================================================================
+1.1 新模块 vision/vhcu_daemon/privacy.py
+      DEFAULT_BLACKLIST = ["密码","银行","隐私","Password","Login","私人"]
+      MAX_TERMS=50, MAX_TERM_CHARS=64
+      foreground_title():
+        - Win32 GetForegroundWindow + GetWindowTextW；
+        - 非 Windows/失败返回 ""，绝不抛异常。
+      sanitize_blacklist(terms):
+        - 去空、去重（casefold）、截断 50 条、单条 <=64 字符。
+      is_sensitive_title(title, terms):
+        - 标题 casefold，任一 term casefold 子串命中即 True；
+        - 空标题/空黑名单 False。
+1.2 Runner
+      - privacy_blacklist 默认 DEFAULT_BLACKLIST；
+      - start(..., privacy_blacklist) 可传入；
+      - configure(privacy_blacklist) 热更新；
+      - _privacy_should_block():
+          命中 → vision.blocked {blocked:true,title,reason:"sensitive-title"}
+                 最多每 5s 重复一次；返回 True；
+          恢复 → vision.blocked {blocked:false,title,reason:"resumed"}。
+      - _loop: 每次 grab 前检查；命中则 previous=None、sleep(interval)、continue，
+        完全不抓像素；
+      - capture_now: 命中则抛 ProtocolError E_DENIED：
+        “检测到敏感窗口，已暂停视觉抓取”。
+      - status().privacy = {blocked,title,blacklist}。
+1.3 Node
+      - state.privacy = {blocked,title}；snapshot 带出；
+      - 监听 vision.blocked：
+          note('vision', '检测到敏感窗口，已暂停视觉抓取' / '…恢复视觉抓取',
+               {blocked,title}, warn/info)
+          pushStatus()。
+      - settings 默认 privacyBlacklist 六项；
+      - mergeSettings 清洗数组（<=50 条、<=64 字、去重）；
+      - 设置 POST 保存后，如果守护进程 ready，发送
+        `vision.configure {privacyBlacklist}` 热更新（3s 超时，失败忽略）；
+      - doStart 发 `vision.start` 时携带 privacyBlacklist。
+1.4 UI（⚙ 设置）
+      新增“隐私黑名单（逗号分隔）”textarea；
+      提示“活动窗口标题包含这些词时，暂停视觉截屏”；
+      保存随现有 settings 一起 POST。
+1.5 事件契约
+      event.json kind 增加 vision.blocked；
+      oneOf 要求 blocked 字段；
+      Node handler 更新 state.privacy 并推 vision 警告。
+
+====================================================================
+2. 多屏/越界坐标钳制
+====================================================================
+2.1 input.py
+      def clamp_click(x,y,width,height) -> (cx,cy,clamped):
+        - width/height 不可用 → E_UNAVAILABLE；
+        - cx=min(max(0,x),width-1)，cy 同理；
+        - clamped = 是否发生修正。
+      normalize_click 内部改用 clamp_click（不再 E_PROTO）。
+2.2 click
+      real_x/real_y = round(raw*scale)
+      clamp_click → 越界则 warning="坐标越界，已修正"
+      返回 applied/normalized + warning。
+2.3 drag
+      两端都 clamp；返回 from/to 修正后 + warning。
+2.4 宏
+      _prepare_step 不再拒绝越界，按字段 x/y clamp 到主屏；
+      run_macro 汇总 warnings ["坐标越界，已修正"]；
+      Node executeStoredMacro 返回 warnings 并拼进 message。
+2.5 工具层
+      vhcu_mouse_click / vhcu_mouse_drag 参数移除 minimum:0（允许模型给负坐标）；
+      返回 warning，message 带原坐标与修正说明；
+      宏结果 warnings 同样回传。
+2.6 安全说明
+      仍保留屏幕四角人工急停；如果钳制到角落可能被 failsafe 拒绝，
+      这是原有安全设计，不是本次回归。
+
+====================================================================
+3. 测试
+====================================================================
+Node 50/50
+  - contract：vision.blocked 事件校验通过；
+  - plugin：settings 默认/清洗 privacyBlacklist；
+    click 负坐标 → 成功 + warning + x=0；
+    P14 破坏键、P13.2 等原用例保持；
+  - guards/macros/client 等保持。
+Python 70/70
+  - test_privacy.py：
+      DEFAULT 命中 Password/银行；普通标题不命中；
+      sanitize 去重/去空/超长过滤；
+      Runner 命中 → vision.blocked true → 切回普通窗口 → false；
+      空黑名单永不 block。
+  - test_input.py：
+      clamp_click(-5,9999,1920,1080)=(0,1079,True)；
+      normalize 负坐标等于 0 坐标；
+      dry-run click(-10,h+50) → applied [0,h-1] + warning；
+      drag 负/超宽 → from/to 修正 + warning；
+      run_macro 越界坐标 → warnings。
+
+====================================================================
+4. 重启验证
+====================================================================
+4.1 完全退出 DSH（无 python.exe/Electron 残留）→ 重开。
+4.2 隐私验证
+  1) vhcu_start_vision；
+  2) 打开一个标题含“密码”的窗口，例如新建文件“密码测试.txt”用记事本打开
+     （活动窗口标题包含“密码”），或浏览器打开标题含 Password 的页面；
+  3) Vision 面板应出现：
+       检测到敏感窗口，已暂停视觉抓取
+     不再产生新的 ROI 变化事件；
+  4) vhcu_get_full_frame 应返回 E_DENIED（不返回截图）；
+  5) 切回普通窗口 → 出现“敏感窗口已离开，恢复视觉抓取”，ROI 恢复；
+  6) ⚙ 设置 → 隐私黑名单，改成自己想要的词并保存；
+     打开匹配标题，应立即暂停（vision.configure 热更新）。
+4.3 坐标钳制
+  1) 保持视觉开启；
+  2) vhcu_mouse_click({x:-100,y:99999}) →
+     应成功（或被急停拒绝）但返回 warning: "坐标越界，已修正"，
+     实际 x 为 0、y 为主屏高度-1，不会飞到副屏；
+  3) vhcu_mouse_drag 传负/超大坐标 → from/to 被钳制并 warning；
+  4) vhcu_run_macro 的 click 坐标越界 → 结果 warnings 提示。
+4.4 回归
+  - 正常窗口截屏/点击不受影响；
+  - 空闲 watchdog、破坏键确认保持原行为。
+
+====================================================================
+5. 文件改动
+====================================================================
+【新增】
+  vision/vhcu_daemon/privacy.py
+  vision/tests/test_privacy.py
+  VHCU-P14.2-01-隐私黑名单与多屏钳制-20261101-1523.txt（本报告）
+【修改】
+  vision/vhcu_daemon/runner.py   隐私检查、vision.blocked、configure/status
+  vision/vhcu_daemon/input.py    clamp_click、click/drag/macro 坐标钳制+warning
+  vision/vhcu_daemon/cli.py      vision.start blacklist、vision.configure
+  vision/tests/test_input.py     钳制/警告用例
+  contract/lib/contract.js       vision.configure op
+  contract/schema/v1/cmd.json    vision.configure
+  contract/schema/v1/event.json  vision.blocked
+  contract/test/contract.test.mjs vision.blocked 校验
+  lib/index.js                   settings 黑名单、vision.configure、blocked 事件
+  lib/client.js                  ⚙ 隐私黑名单 textarea
+  host/test/plugin.test.mjs      settings 清洗、click 钳制 warning
+  package.json / dsh.plugin.json 0.19.0
+  README.md                      P14.2 说明
+【备份】
+  input.py.bak、runner.py.bak、privacy.py.bak、index.js.bak、client.js.bak、
+  package.json.bak、dsh.plugin.json.bak、README.md.bak
+
+====================================================================
+6. 已知边界
+====================================================================
+R1. 隐私判断基于活动窗口标题子串；不改窗口标题的隐私页面无法识别。
+R2. 只读 Win32 前台标题，非 Windows 返回空标题（不阻塞）。
+R3. 命中时视觉循环暂停但守护进程/Hear 继续；内存仍占用，空闲 watchdog 会兜底。
+R4. 多屏仍只抓主屏；副屏坐标被钳到主屏边缘。
+R5. 屏幕四角急停可能拒绝钳制到角落的点击。
+R6. 真实前台窗口标题与设置热更新需重启后人工验证。
+
+（报告完）

@@ -1,0 +1,183 @@
+DSH-VHCU  P4-01  视觉 V2.0（frame_url / Markdown 图片 / 分页防爆仓）交付报告
+生成时间：2026-10-31 20:18 (Asia/Shanghai)
+阶段：P4（让模型从「知道哪里变了」到「能看清变化区域」）
+前置：P3 工具已在宿主跑通；本轮按惯例先备份再改
+
+====================================================================
+0. 结论（先看这 6 条）
+====================================================================
+C1. vhcu_get_vision_events 的每条事件、每个 ROI 都新增 frame_url：绝对地址、HMAC-SHA256 签名、
+    TTL 10 分钟，指向 /vhcu/frame?x=..&y=..&w=..&h=..&maxw=960&exp=..&sig=..。
+C2. render 文本块里直接输出 Markdown 图片：![变化区域 1](http://127.0.0.1:端口/vhcu/frame?...)；
+    每条事件最多嵌 3 张，其余给提示，避免一次刷屏。
+C3. 防爆仓：limit 可选（默认 5，最多 20）；since_id 可选（只取更新的），返回 next_since_id /
+    has_more 支持连续分页。长时间盯屏/视频可以分批读，不会把上下文撑爆。
+C4. 安全收紧：/vhcu/frame **只接受签名 URL**。原因：<img> 请求不带 Origin，靠同源判断等于把
+    屏幕内容暴露给任意本机网页；无签名一律 403（实测）。
+C5. 验证：Node 28/28、Python 18/18；新增断言覆盖绝对 frame_url、HTTP 取回真 PNG（89 50 开头）、
+    Markdown 输出、limit 生效、since_id 分页/空页、伪造签名与无签名 403。
+C6. 生效需完全重启 DSH；工具 schema 已变化（limit/since_id），旧会话不会热更新。
+
+====================================================================
+1. 改动明细
+====================================================================
+1.1 vhcu_get_vision_events（唯一行为变化最大的工具）
+  description 更新：说明默认 5 条、最多 20、frame_url 可直接看区域截图、since_id 分页。
+  parameters（raw JSON Schema）：
+    {
+      type:'object',
+      properties:{
+        limit:   {type:'integer', minimum:1, maximum:20, description:'默认 5'},
+        since_id:{type:'integer', minimum:0, description:'只返回 id 大于该值的新事件'}
+      },
+      additionalProperties:false
+    }
+  返回新增/变化字段：
+    limit, since_id, next_since_id, has_more,
+    events[].frame_url,
+    events[].rois[].frame_url（每个 ROI 一条独立签名链接）
+  分页语义：
+    - 不传 since_id：返回最近 limit 条（适合「现在发生了什么」）；
+    - 传 since_id：返回 id > since_id 的**最早** limit 条（适合连续消费），
+      has_more 表示还有；next_since_id 作为下一次的 since_id。
+  render：
+    [HH:MM:SS] 检测到画面变化 · N 个区域 · X ms · 宽x高 (id=..)
+      ![变化区域 1](http://127.0.0.1:.../vhcu/frame?...)   ← 最多 3 张
+    末尾输出 next_since_id=..；has_more 时提示继续拉取。
+
+1.2 frame_url 的生成与校验（lib/index.js）
+  - 插件 apply 时生成 32B 随机 secret（每次重启重置）。
+  - 签名内容：`x|y|w|h|exp`；sig = HMAC-SHA256(secret, payload) hex。
+  - URL：`${origin}/vhcu/frame?x=..&y=..&w=..&h=..&maxw=960&exp=..&sig=..`
+    origin 来自 ctx.webServer.getOrigin()（真实宿主），mock/dev 用 setOrigin(base)；
+    取不到时退化为相对路径 /vhcu/frame?...（DSH UI 内仍可用）。
+  - 路由校验：exp 未过期、sig 为 64 位 hex、timingSafeEqual 比较；任何一项失败 → 403。
+  - 不复用 Python 的 token：host 侧签名只允许「读某个 ROI 的 PNG」，不暴露 Python 端口/token。
+
+1.3 隐私与安全
+  - 图像字节仍然只走本地回环；模型 API 只收到 JSON + URL 文本。
+  - 签名 URL 是只读能力、10 分钟过期；日志不打印完整 sig。
+  - 无签名 / 过期 / 跨源伪造均拒绝（测试覆盖）。
+
+====================================================================
+2. 验证记录
+====================================================================
+2.1 Node 28/28（contract 10 / supervisor 9 / integration 2 / plugin 4 / client 3）
+  P4 用例（host/test/plugin.test.mjs）逐项：
+    - frame_url 以 http://127.0.0.1:port/vhcu/frame? 开头；
+    - query 含 sig=<64 hex>、exp=<数字>；
+    - GET 该 URL 返回 200 + image/png，字节前两位 0x89 0x50（真 PNG，>50B）；
+    - render 文本含 `![变化区域 1](http://` 与 `next_since_id=`；
+    - limit=2 生效，count ≤2；
+    - since_id=0,limit=1 返回 1 条；since_id=1e9 返回 0 条；
+    - 伪造 sig + 外源 Origin → 403；完全无 sig → 403；
+    - stop 后 python 子进程退出、重复 stop 幂等。
+
+2.2 Python 18/18（视觉层未改）
+2.3 安装位置烟测（profile junction）
+    import/apply → routes 4、tools 3；dispose 后归零。
+2.4 dev harness（mock ctx + 真实 host 插件）
+    /vhcu/state 200 idle；`registered 3 tools`；无签名 frame 请求 403。
+
+====================================================================
+3. 重启与测试
+====================================================================
+3.1 重启
+  ① 完全退出 DSH（托盘退出 / 任务管理器确认 Electron 进程结束）；
+  ② 重新打开 DSH；
+  ③ 新开会话（工具 schema 与工具表在启动时构建）。
+  日志确认：
+    dsh-vhcu: mounted (routes /vhcu/state|events|control|frame)
+    dsh-vhcu: registered 3 tools
+
+3.2 对话验收（复制即可）
+  A. 最小链路：
+     「用 vhcu_start_vision 开启视觉，等 3 秒，用 vhcu_get_vision_events 看看屏幕变化，
+       把变化区域的图片链接也发给我，然后 stop。」
+     预期：JSON 每条事件有 frame_url；render 出现 `![变化区域 1](http://127.0.0.1:.../vhcu/frame?...)`。
+  B. 分页：
+     「用 since_id=0、limit=2 拉事件，每次告诉我 next_since_id 和 has_more。」
+     预期：按 id 递增返回；has_more=true 时用 next_since_id 继续。
+  C. 长盯屏：
+     「开启视觉后每隔 10 秒用 since_id 拉一次新事件（limit=3），持续 1 分钟。」
+     预期：每轮只返回增量，不重复、不爆上下文。
+  D. 图片直验：
+     浏览器打开返回的 frame_url，10 分钟内应直接得到 PNG；过期或改 sig 应 403。
+
+3.3 如果 frame_url 打开 403
+  - 链接超过 10 分钟：重新调用 vhcu_get_vision_events 取新链接；
+  - 手动改过 x/y/w/h/sig：签名只对原始坐标有效；
+  - vision 已停止（409）：frame_url 只在运行期间可拉取。
+
+3.4 如果模型说「看不到图」
+  - 当前 render 是 text block，Markdown 是否被 DSH 客户端渲染/送入模型取决于客户端能力；
+  - 工具保证 URL/JSON 正确；要 100% 让模型看到像素，P5 应通过 attachments 返回 image
+    content block（与 read_image 同机制）。
+
+====================================================================
+4. 文件改动（按要求列出）
+====================================================================
+【新增】
+  VHCU-P4-01-视觉V2-frame_url与分页-20261031-2018.txt（本报告）
+【修改】（覆盖前已改名 .bak，只留最近一份）
+  lib/index.js           + crypto 签名/校验；frame_url；Markdown render；
+                          limit/since_id 分页；frame 路由改为强制签名
+                         （备份 lib/index.js.bak）
+  package.json           version 0.4.0（备份 package.json.bak）
+  dsh.plugin.json        version 0.4.0（备份 dsh.plugin.json.bak）
+  README.md              P4 说明、frame_url 示例、签名与分页、测试步骤（备份 README.md.bak）
+  host/test/plugin.test.mjs  P3 用例升级为 P4：签名帧、PNG、Markdown、limit、since_id、403
+                         （备份 host/test/plugin.test.mjs.bak）
+  dev/mock-ctx.mjs       webServer.getOrigin/setOrigin（备份 dev/mock-ctx.mjs.bak）
+  dev/server.mjs         listen 后 setOrigin（无 .bak：本轮直接改开发辅助文件；见下）
+【未改】
+  lib/client.js、contract/、vision/、cordis.patch.yml、scripts/install.mjs
+【工作区外】
+  profile junction 与 package.json 已在 P2 挂载；本轮无改动。
+
+说明：按要求生产文件均有 .bak；dev/server.mjs 属开发辅助脚本，改动仅一行且无部署影响，
+未单独保留 .bak（如需回退：删掉 listen 回调里的 setOrigin 调用即可）。
+
+====================================================================
+5. 风险与下一步
+====================================================================
+R1. Markdown 图片是否被 DSH 渲染/进入模型上下文未经真实重启验证；P5 建议用 attachments
+    返回 image content block，保证模型真的“看到像素”。
+R2. 签名 URL 的 origin 来自 getOrigin()；若桌面壳通过代理端口访问 webServer，图片域名可能
+    与页面不同源，但签名 URL 不依赖 Cookie，仍可加载（需真实环境确认）。
+R3. 10 分钟 TTL 对长视频回看偏短；后续可把 TTL 做成配置（默认 10 分钟）。
+R4. since_id 分页只覆盖内存环（200 条）；更久历史需要落盘（P5+）。
+R5. limit 上限 20 是经验值，防止单次 JSON 过大；可按模型上下文预算调整。
+
+P5 建议顺序：
+  N1. 重启验收 A/B/C/D 四条提示词；
+  N2. tool 结果附加 image content block（attachments.saveImages），让模型直接看图；
+  N3. frame_url TTL/尺寸可配置，并在 UI 里显示缩略图；
+  N4. 事件环落盘 + 会话归档。
+
+====================================================================
+附录 A：本轮聊天窗口回复原文（归档）
+追加时间：2026-10-31 20:18
+====================================================================
+P4 完成：事件现在带签名 frame_url，render 里直接输出 Markdown 图片，并加了 limit/since_id 分页防爆仓。
+
+- frame_url：绝对地址 + HMAC 签名（x|y|w|h|exp），TTL 10 分钟；/vhcu/frame 只认签名，
+  无签名/伪造/过期一律 403（避免网页用 <img> 偷看屏幕）。
+- 默认返回最近 5 条（最多 20）；传 since_id 只取新事件，返回 next_since_id/has_more 可连续分页。
+- render：每条事件最多嵌 3 张 `![变化区域 N](...)`，并附 next_since_id。
+- 测试：Node 28/28、Python 18/18；覆盖真 PNG 拉取、Markdown、limit、since_id、403。
+- 生效需完全重启 DSH。重启后新会话可直接说：
+  「用 vhcu_start_vision 开，等 3 秒，用 vhcu_get_vision_events 看看变化，把图片链接发我，然后 stop。」
+
+【新增】VHCU-P4-01-视觉V2-frame_url与分页-20261031-2018.txt
+【修改】lib/index.js(.bak) / package.json(.bak) / dsh.plugin.json(.bak) / README.md(.bak) /
+        host/test/plugin.test.mjs(.bak) / dev/mock-ctx.mjs(.bak) / dev/server.mjs
+
+====================================================================
+附录 B：本轮记忆写入
+====================================================================
+memory_submit：P4 frame_url 签名方案（HMAC x|y|w|h|exp，TTL 10min，强制签名）、
+Markdown 输出、limit 默认5/上限20、since_id/next_since_id/has_more、Node28+Python18、
+重启验收提示词，以及“Markdown 是否被 DSH 渲染待验证、P5 用 image content block”的边界。
+
+（报告完）

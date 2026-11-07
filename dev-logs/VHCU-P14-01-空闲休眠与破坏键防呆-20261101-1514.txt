@@ -1,0 +1,161 @@
+DSH-VHCU  P14-01  空闲自动休眠 + 破坏性按键防呆
+生成时间：2026-11-01 15:14 (Asia/Shanghai)
+阶段：P14（安全隐患排雷）
+前置：视觉/听觉联动测试通过
+
+====================================================================
+0. 结论（先看这 6 条）
+====================================================================
+C1. 新增空闲看门狗：每 15s 检查一次；视觉连续 5 分钟无有效 ROI 变化、
+    听觉连续 5 分钟无有效转写文本 → 自动 stop，释放 Python/模型。
+C2. 自动休眠后 UI 推送：“因长时间无活动，已自动休眠”
+    （Action 通道 + 状态环），phase/hear 回到 idle。
+C3. 破坏性快捷键 `alt+f4` / `ctrl+s` / `delete` 必须显式传
+    `confirm_destructive: true`；否则返回 E_CONFIRM_REQUIRED，
+    并提示“请先征得用户同意”。
+C4. 安全快捷键/确认后的破坏性快捷键不受影响；
+    错误码/schema 增加 E_CONFIRM_REQUIRED。
+C5. 测试：Node 49/49、Python 64/64；
+    新增 guards 测试、工具拦截/确认测试。
+C6. 版本 0.18.0，需重启 DSH 生效。
+
+====================================================================
+1. 排雷 1：空闲自动休眠
+====================================================================
+1.1 新增 host/lib/guards.js
+      IDLE_TIMEOUT_MS = 5 * 60 * 1000
+      IDLE_CHECK_MS = 15 * 1000
+      idleExpired(lastActivityAt, now, timeout):
+          last>0 && now-last >= timeout
+      isDestructiveHotkey(keys):
+          归一化小写，匹配 alt+f4 / ctrl+s / delete（顺序无关）
+1.2 Node（lib/index.js）
+      lastVisionActivityAt / lastHearActivityAt：
+        - doStart 成功时置 now；
+        - doStartHear 成功（listening）时置 now；
+        - vision.diff 且 rois.length>0 时更新；
+        - hear.text 到达时更新。
+      checkIdle（每 15s）：
+        visionActive = state.running；
+        hearActive = hear.running 或状态 starting/loading/listening；
+        两者都不活跃 → return；
+        取当前活跃引擎的最近活动时间；idleExpired 则 auto-sleep。
+      auto-sleep：
+        - 若视觉在跑 → doStop()（会一并停掉共享 Python/Hear）；
+        - 若只有 Hear → doStopHear()（并退出仅 Hear 的守护进程）；
+        - note('action','因长时间无活动，已自动休眠', {action:'auto_sleep'}, 'warn')
+        - note('status', 同文案)
+        - pushStatus()。
+      - 清场期间 idleSleeping 防重入；
+      - startIdleWatchdog 在 mount 时启动，cleanup 时 stopIdleWatchdog；
+      - timer.unref() 避免测试/宿主退出被拖住。
+1.3 可调超时
+      VHCU_IDLE_TIMEOUT_MS（模块加载时读取，默认 300000）
+      用于演示/验证时缩短，例如 15000，重启 DSH 生效。
+1.4 语义
+      “有效” = ROI 数量>0 的视觉变化，或非空 hear 文本；
+      只有 loading/心跳/状态不算活动；
+      视觉与 Hear 只要有一个在持续产生有效事件，就不会休眠。
+1.5 已知边界
+      - 5 分钟内只有鼠标键盘动作但没有画面变化/转写，也会休眠（按需求）；
+      - 自动休眠不是崩溃，用户重新点开启即可；
+      - 定时器 15s 粒度，实际休眠在 300~315s 之间。
+
+====================================================================
+2. 排雷 2：破坏性按键确认
+====================================================================
+2.1 工具 schema（vhcu_key_press）
+      新增 confirm_destructive: boolean；
+      description 增加警告：alt+f4 / ctrl+s / delete 必须确认。
+2.2 execute 拦截
+      normalized = keys.map(String)
+      if (isDestructiveHotkey(normalized) && confirm_destructive !== true):
+          recordAction('key_press', {ok:false, error:'E_CONFIRM_REQUIRED'})
+          return {
+            ok:false,
+            code:'E_CONFIRM_REQUIRED',
+            error:'这是破坏性操作（ctrl+s）。请先征得用户同意再执行。',
+            hint:'得到用户明确同意后，重新调用并传 confirm_destructive: true。'
+          }
+      只有确认后才走 runInputAction → Python。
+2.3 覆盖范围
+      - alt+f4（关窗）
+      - ctrl+s（保存覆盖）
+      - delete（删除）
+      安全键（ctrl+a、win+left、tab 等）不受影响。
+      注意：宏执行（vhcu_run_macro）内嵌的 key step 不走本拦截；
+      macro_close_active_window 仍按原设计用于任务善后。
+2.4 契约
+      ERROR_CODES 增加 E_CONFIRM_REQUIRED；
+      schema/v1/error.json 的 code enum 同步增加；
+      errorFrame 可正常生成该错误。
+2.5 测试
+      - guards: alt+f4/大小写/ctrl+s/delete=true；
+        ctrl+a、shift+delete、[]=false；
+      - idleExpired: 300000ms 边界 true，299999 false，0 false；
+      - plugin: 三种破坏键未确认 → E_CONFIRM_REQUIRED；
+        ctrl+s + confirm_destructive:true → 不再被拦截；
+        ctrl+a 不受影响。
+
+====================================================================
+3. 测试
+====================================================================
+Node 49/49
+  contract 11 + supervisor 9 + integration 2 + plugin 14 + client 4
+  + macros 7 + guards 2（约）
+Python 64/64（沿用 Hear 全部用例）
+
+====================================================================
+4. 重启验证
+====================================================================
+4.1 完全退出 DSH（无 python.exe/Electron 残留）→ 重开。
+4.2 破坏性按键
+  1) vhcu_start_vision；
+  2) vhcu_key_press(["ctrl","s"]) → 应返回 E_CONFIRM_REQUIRED，
+     Action 面板出现红色失败记录；
+  3) vhcu_key_press(["ctrl","s"], confirm_destructive:true) → 正常执行；
+  4) alt+f4、delete 同理；
+  5) ctrl+a 不应要求确认。
+4.3 空闲休眠（快速演示）
+  1) 设置环境变量 VHCU_IDLE_TIMEOUT_MS=15000 后重启 DSH；
+  2) 开启视觉但不操作屏幕 / 开启 Hear 但不播放声音；
+  3) 约 15-30s 后应自动停止，Action 出现
+     “因长时间无活动，已自动休眠”。
+  4) 去掉环境变量恢复默认 5 分钟。
+4.4 正常活动不误睡
+  1) 播放视频让 Hear 持续出字（或视觉持续变化）；
+  2) 超过 5 分钟仍应保持 listening/running。
+4.5 休眠后
+  - state.phase=idle、state.hear=idle、Python 进程退出；
+  - 用户点开启可正常重新启动。
+
+====================================================================
+5. 文件改动
+====================================================================
+【新增】
+  host/lib/guards.js                 idleExpired / isDestructiveHotkey
+  host/test/guards.test.mjs          guards 单测
+  VHCU-P14-01-空闲休眠与破坏键防呆-20261101-1514.txt（本报告）
+【修改】
+  lib/index.js                       活动时间戳、idle watchdog、
+                                     vhcu_key_press 确认门、E_CONFIRM_REQUIRED
+  contract/lib/contract.js           错误码
+  contract/schema/v1/error.json      enum
+  host/test/plugin.test.mjs          破坏键拦截/确认测试；P5 ctrl+s 加确认
+  package.json / dsh.plugin.json     0.18.0
+  README.md                          P14 说明
+【备份】
+  lib/index.js.bak、contract.js.bak、error.json.bak、
+  package.json.bak、dsh.plugin.json.bak、README.md.bak
+
+====================================================================
+6. 已知边界
+====================================================================
+R1. 空闲判断只看有效视觉 ROI / Hear 文本，不把鼠标键盘动作计为活动。
+R2. 自动休眠粒度 15s，最迟约 315s 触发。
+R3. 宏内 key step 不受 confirm_destructive 拦截（按需求只拦 vhcu_key_press）；
+   macro_close_active_window 是任务善后宏，保留可用。
+R4. VHCU_IDLE_TIMEOUT_MS 在模块加载时读取，修改后必须重启 DSH。
+R5. 真实 5 分钟等待未在自动化测试中执行，需人工/缩短超时验证。
+
+（报告完）

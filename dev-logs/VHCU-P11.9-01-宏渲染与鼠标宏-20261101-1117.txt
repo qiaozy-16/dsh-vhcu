@@ -1,0 +1,200 @@
+DSH-VHCU  P11.9-01  宏结果变量渲染 + 3 个鼠标宏
+生成时间：2026-11-01 11:17 (Asia/Shanghai)
+阶段：P11.9（修复渲染漏字段；扩展鼠标动作库并接入图片坐标映射）
+前置：P11.8 参数宏/两级宏组完成；本轮按惯例先备份代码
+
+====================================================================
+0. 结论（先看这 6 条）
+====================================================================
+C1. vhcu_run_macro 结果现在在聊天框渲染「变量映射 / 展开文本 / 坐标」，
+    不再只显示耗时和 op 列表（P7 describeTimingAndSteps 漏字段问题修复）。
+C2. executeStoredMacro 新增返回 variable_map（实际 name→value）、texts（展开文本）、
+    coords（真正执行的物理坐标）、scale_factor。
+C3. Python run_macro 支持鼠标新 op：double_click、right_click（drag 已有）；
+    坐标字段支持 {{变量}} 占位符，并在 run_macro 内统一解析 + 可选 scale。
+C4. 系统基础宏新增 3 个鼠标宏：
+      macro_mouse_double_click(x,y)
+      macro_mouse_right_click(x,y)
+      macro_window_drag(x1,y1,x2,y2)
+    支持 vhcu_run_macro(..., is_relative_to_image=true) 的图片坐标换算。
+C5. 宏库 steps 校验扩展：double_click/right_click；click/double/right/drag 的坐标
+    可为整数或 {{var}} 字符串；macroVariables 会扫描所有字符串字段。
+C6. 测试：Node 42/42、Python 47/47；真实 macros.json 已迁移为 7 个内置宏，
+    迁移前备份 macros.json.bak-p118。
+
+====================================================================
+1. 渲染修复
+====================================================================
+1.1 问题
+  vhcu_run_macro 返回 {variables:["path","folder_name"], texts:[...]}，
+  但 describeTimingAndSteps 只处理 elapsed_ms 与 steps，导致聊天框看不到映射过程。
+1.2 结果字段（executeStoredMacro）
+    variable_map: {path:"<local-path>", folder_name:"VHCU_P118"}
+    texts: ["<local-path>", "VHCU_P118"]            # type 步骤展开后的文本
+    coords: [[240,120]]                     # 鼠标步骤真正执行的物理坐标
+    scale_factor: 2.4
+    variables: ["path","folder_name"]       # 宏声明的变量名
+1.3 渲染（describeTimingAndSteps）
+    耗时：123 ms
+    变量映射：
+      path = <local-path>
+      folder_name = VHCU_P118
+    展开文本：
+      1. <local-path>
+      2. VHCU_P118
+    坐标：(240,120)
+    步骤：
+      1. key
+      ...
+  - variable_map 为空但有 variables 时显示「变量声明：...」；
+  - texts/coords 为空时省略，保持原有输出简洁。
+1.4 测试
+  - P11.9 插件测试：relative double_click 结果 render 必含「变量映射：」「x = 100」「坐标：」；
+  - macro_create_folder 结果 render 含「变量映射：」「path = <local-path>：」。
+
+====================================================================
+2. 鼠标动作与坐标变量
+====================================================================
+2.1 steps 新 op（host/lib/macros.js + Python _run_step）
+  {op:"double_click", x, y}   左键双击（move → down/up ×2，间隔 50ms）
+  {op:"right_click",  x, y}   右键单击（move → RIGHTDOWN → RIGHTUP）
+  {op:"drag", x1,y1,x2,y2}    已有：左键按下→12 步插值→释放
+2.2 坐标占位符
+  - 校验：坐标可以是 0..100000 的整数，或形如 {{x}} 的字符串（≤40）；
+  - macroVariables 扫描步骤所有字符串字段（text/x/y/x1..），按首次出现顺序去重；
+  - Python _prepare_step：
+      解析 text 与坐标字段里的 {{name}}（缺变量 E_PROTO）；
+      鼠标 op 的坐标转 int，校验 0..100000；
+      若传 scaleFactor，则 round(value*scale) 并写回；
+      返回该步 coords 供 dry-run/结果展示。
+2.3 run_macro 参数
+  input.macro.run args: {steps, variables, scaleFactor?}
+  Python run_macro(steps, variables=None, scale_factor=None)
+  dry-run 返回 {steps,texts,coords,variables,scaleFactor,elapsedMs:0}
+2.4 Node vhcu_run_macro
+  新增 is_relative_to_image（boolean）：
+    - true 且 lastFrameMeta 存在 → 传 scaleFactor；
+    - 未取全屏 → E_STATE（先 vhcu_get_full_frame）；
+    - 返回 scale_factor/coords 供核对。
+  旧 text 参数仍兼容（variables.text）。
+
+====================================================================
+3. 内置鼠标宏（系统基础宏）
+====================================================================
+  macro_mouse_double_click  vars x,y        1 步 double_click
+  macro_mouse_right_click   vars x,y        1 步 right_click
+  macro_window_drag         vars x1,y1,x2,y2 1 步 drag
+  全部 category=系统基础宏、builtin=true、只读可启停。
+  示例：
+    vhcu_run_macro({
+      name:"macro_mouse_double_click",
+      variables:{x:400,y:300},
+      is_relative_to_image:true
+    })
+    → Python 解析变量 → round(400*scale), round(300*scale) → 双击；
+      返回 variable_map {x:"400",y:"300"}、coords [[..]]、scale_factor。
+  未取全屏直接 relative → E_STATE。
+
+====================================================================
+4. 真实宏库迁移
+====================================================================
+  迁移前备份：%LOCALAPPDATA%\dsh-vhcu\macros.json.bak-p118
+  迁移后（已用 node 读取验证）：
+    categories = 系统基础宏(builtin):7 | 我的自定义宏:0
+    macros =
+      save_file
+      macro_launch_app        vars=app_name,text
+      macro_create_folder     vars=path,folder_name
+      macro_browser_search    vars=keyword
+      macro_mouse_double_click vars=x,y
+      macro_mouse_right_click  vars=x,y
+      macro_window_drag        vars=x1,y1,x2,y2
+  旧 P11.8 的 4 个内置宏保留，新增 3 个（seed 缺失自动补齐）。
+
+====================================================================
+5. 测试
+====================================================================
+Node 42/42（contract10 / supervisor9 / integration2 / plugin11 / client3 / macros7）
+  新增：
+    - render 含变量映射/展开文本/坐标；
+    - relative double_click：coords == round(100*scale),round(50*scale)；
+    - 未取图 relative → E_STATE；
+    - right_click / window_drag dry-run coords；
+    - 宏库：鼠标宏 variables 派生、坐标占位符校验、种子 7 条。
+Python 47/47
+  - run_macro double/right/drag + 坐标变量 + scale=2.0 → coords [[200,100],[200,100],[20,40,60,80]]；
+  - 坐标变量非数字 → E_PROTO；
+  - 原有多变量/缺变量/输入/IME 用例通过。
+
+====================================================================
+6. 重启验证
+====================================================================
+6.1 重启
+  完全退出 DSH（确认 Electron/python.exe 无残留）→ 重开 → 新会话。
+  日志：
+    dsh-vhcu: mounted (routes /vhcu/state|events|control|frame|settings|macros)
+    dsh-vhcu: registered 13 tools
+6.2 宏数量
+  VHCU → ⚙ → 系统基础宏 应显示 7 个宏（含 3 个鼠标宏）。
+6.3 渲染验证
+  vhcu_start_vision → vhcu_run_macro("macro_create_folder",
+    variables:{"path":"<local-path>","folder_name":"VHCU_RENDER"})
+  聊天框结果应出现：
+    变量映射：
+      path = <local-path>
+      folder_name = VHCU_RENDER
+    展开文本：
+      1. <local-path>
+      2. VHCU_RENDER
+6.4 鼠标宏 relative
+  1) vhcu_get_full_frame(max_width=800)，记下 scale_factor（如 2.4）；
+  2) vhcu_run_macro("macro_mouse_double_click",
+       variables:{"x":400,"y":300}, is_relative_to_image:true)
+     预期双击真实 (round(400*scale), round(300*scale))，
+     返回 coords/scale_factor；
+  3) 不先取图直接 relative → E_STATE；
+  4) macro_mouse_right_click / macro_window_drag 可用物理坐标或相对坐标验证。
+6.5 边界
+  - 双击间隔 50ms；某些应用需要更慢时可自定义两个 click + wait。
+  - relative 只对最近一次显式 full_frame 生效；分辨率变化需重新取图。
+
+====================================================================
+7. 文件改动
+====================================================================
+【新增】
+  VHCU-P11.9-01-宏渲染与鼠标宏-20261101-1117.txt（本报告）
+【修改】（覆盖前已改名 .bak）
+  host/lib/macros.js           double_click/right_click op、坐标占位符、
+                               macroVariables 全字段扫描、3 个种子宏
+  lib/index.js                 variable_map/texts/coords 返回、render 渲染、
+                               run_macro is_relative_to_image、描述
+  lib/client.js                组内列表显示宏参数（P11.8 已有，本轮随构建保留）
+  vision/vhcu_daemon/input.py  double/right click 实现、_prepare_step 变量+scale
+  vision/vhcu_daemon/cli.py    传递 scaleFactor
+  vision/tests/test_input.py   鼠标坐标/scale/非法变量用例
+  host/test/macros.test.mjs    7 种子/鼠标占位符
+  host/test/plugin.test.mjs    P11.9 鼠标宏 + 渲染测试
+  package.json / dsh.plugin.json  0.13.0
+  README.md                    P11.9 渲染/鼠标宏说明
+【外部数据】
+  %LOCALAPPDATA%\dsh-vhcu\macros.json  已补 3 个鼠标宏（7 builtin）
+  备份：macros.json.bak-p118
+【未改】
+  contract、runner.py、httpframe.py、install.mjs
+
+====================================================================
+8. 已知边界与下一步
+====================================================================
+R1. 鼠标宏坐标仍受屏幕分辨率影响；relative 模式可缓解缩略图缩放，但屏幕布局变化仍需重新取图。
+R2. 双击间隔固定 50ms，无配置项。
+R3. 变量只替换字符串字段中的 {{name}}；无默认值/表达式。
+R4. 内置宏只读；自定义宏可改。
+R5. 仍只支持主屏。
+
+P12 建议：
+  N1. 双击间隔/拖拽速度可配置；
+  N2. 宏变量声明与默认值；
+  N3. 鼠标宏录制器（自动把 click/drag 序列写入 steps）；
+  N4. 多屏坐标空间。
+
+（报告完）

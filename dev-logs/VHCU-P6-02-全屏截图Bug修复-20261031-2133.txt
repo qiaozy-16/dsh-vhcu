@@ -1,0 +1,143 @@
+DSH-VHCU  P6-02  全屏快照 Bug 修复报告（w=320&h=180 → 1920x1080）
+生成时间：2026-10-31 21:33 (Asia/Shanghai)
+阶段：P6.1（缺陷修复）
+触发：用户实测 vhcu_get_full_frame 返回的 frame_url 固定 w=320&h=180，只能看到左上角
+
+====================================================================
+0. 结论（先看这 6 条）
+====================================================================
+C1. 根因确认：不是抓屏/差分裁剪，而是 Runner.capture_now() 用了 **defaults**（320x180 的
+    差分画布/fake 默认）创建快照源，而没有用 **vision.start 实际启动的 mss 源**。
+    mss 抓屏本身是 1920x1080，但快照走的是 fake 320x180，于是签出的 URL 固定 w=320&h=180。
+C2. 修复：Runner 记录 active_source（start 时更新，stop 清空）；capture_now 优先用它创建
+    快照源（mss → 原生主屏；fake → 继承最近帧尺寸）；start/stop 时重置/关闭快照源。
+C3. 双层防线：Node 的 vhcu_get_full_frame 拒绝 source=fake 或 width<640/height<480 的结果，
+    返回 E_UNAVAILABLE，绝不把 320x180 签成“全屏图”（即便未来回归也能立刻暴露）。
+C4. 实测（真实 mss，非 dry-run 注入）：修后返回 source=mss、width=1920、height=1080，
+    frame_url 中 w=1920&h=1080。
+C5. 回归测试：Node 新增“强制 fake 必须报 E_UNAVAILABLE”；正向用例断言 source=mss 且
+    URL 的 w/h 与 capture 宽高一致；Python 新增 Runner.capture_now 单测。
+C6. 测试结果：Node 31/31、Python 32/32；输入类仍全部 dry-run（未注入真实键鼠）。
+
+====================================================================
+1. 根因分析（为什么是 320x180）
+====================================================================
+1.1 相关代码（修复前）
+  Runner.__init__:
+    defaults = { source: args.source (默认 "fake"),
+                 width: 320, height: 180, ... }   ← 差分画布尺寸
+  Runner.start(name):
+    实际 create_source(name) 成功，但 **没有写回 defaults["source"]**。
+  Runner.capture_now():
+    create_source(self.defaults["source"], width=320, height=180)
+    → fake 源（320x180）→ Frame 320x180
+    → daemon 返回 width/height=320/180
+    → Node frameUrl({x:0,y:0,w:320,h:180}) → 下载只有左上角。
+1.2 为什么 mss 抓屏本身没问题
+  MssSource 忽略 width/height，永远抓主屏原生分辨率；差分事件里的 screen 也是 1920x1080。
+  所以问题只出现在“按需全屏快照”这条新路径上（P6 引入）。
+1.3 影响面
+  仅 vhcu_get_full_frame（及其 frame_url）；ROI 事件、点击/滚轮/拖拽不受影响（用户实测
+  拖拽/滚轮无 DPI 偏移）。
+
+====================================================================
+2. 修复内容
+====================================================================
+2.1 vision/vhcu_daemon/runner.py
+  - 新增 self.active_source: Optional[str] = None。
+  - start()：成功后 self.active_source = name；关闭并重置旧的 _snapshot_source。
+  - stop()：active_source = None；关闭 _snapshot_source。
+  - capture_now()：
+      name = self.active_source or self.defaults["source"]
+      若已有快照源但 name 不一致 → 关闭重建；
+      创建尺寸：width = latest.width（有帧时）else defaults.width（fake 兜底）；
+      mss 忽略尺寸，仍抓原生主屏；
+      返回结果增加 "source": name。
+2.2 lib/index.js（Node 防线）
+  - doStart 支持 VHCU_FORCE_FAKE=1（仅测试/演示用），强制 fake 以复现回归。
+  - vhcu_get_full_frame：
+      captureSource = capture.source
+      若 captureSource === 'fake' 或 width < 640 或 height < 480：
+        return { ok:false, code:'E_UNAVAILABLE',
+                 error:`全屏抓取返回 ${w}x${h}（source=${s}），不是真实主屏分辨率，已拒绝生成错误链接` }
+      否则才生成签名 URL（w/h 用 capture 实际宽高）。
+  - 成功返回增加 source 字段，便于模型/日志判断数据是否来自真实屏幕。
+2.3 测试
+  - host/test/plugin.test.mjs：
+      P6 正向：断言 frame.source === 'mss'；URL 的 w/h 等于 frame.width/height。
+      新增回归：VHCU_FORCE_FAKE=1 → start(source=fake) → full_frame 必须 E_UNAVAILABLE，
+      且不返回 frame_url。
+  - vision/tests/test_units.py：RunnerCaptureTest 验证 capture_now 报告 active source 与尺寸。
+2.4 版本
+  package.json / dsh.plugin.json → 0.6.1。
+
+====================================================================
+3. 验证记录
+====================================================================
+3.1 真实主屏（非 dry-run；只抓屏，不注入）
+  start → source=mss
+  full_frame → {"ok":true,"source":"mss","width":1920,"height":1080,
+                "url":["1920","1080"]}   （从 frame_url 解析 w/h）
+3.2 Node 31/31：contract 10 / supervisor 9 / integration 2 / plugin 7 / client 3
+  P6 正向用例：full_frame ok、source=mss、签名 URL 可取回真 PNG（89 50）、
+               URL w/h 与 capture 一致、Markdown ![全屏截图]。
+  回归用例：强制 fake → E_UNAVAILABLE，error 包含 320x180，无 frame_url。
+3.3 Python 32/32：包含 Runner.capture_now 的 active source/尺寸断言。
+3.4 手动 dry-run 说明
+  输入注入类测试仍全部 VHCU_INPUT_DRY_RUN=1；本次只对“抓屏”做了真实调用（安全、无副作用）。
+
+====================================================================
+4. 如何重启 / 复测
+====================================================================
+4.1 重启
+  ① 完全退出 DSH（托盘退出；任务管理器确认 Electron 进程结束，避免旧 daemon 残留）；
+  ② 重新打开 DSH；新开会话；
+  ③ 日志确认：dsh-vhcu: registered 9 tools。
+4.2 复测全屏（关键）
+  对模型说：
+  「用 vhcu_start_vision 开视觉；调用 vhcu_get_full_frame；把返回的 width、height、
+    frame_url 原样打印给我；然后用 vhcu_stop_vision 关闭。」
+  预期：
+    width=1920, height=1080, source=mss
+    frame_url 含 w=1920&h=1080（不再是 320x180）
+    浏览器打开该 URL 能看到完整桌面。
+  再测一次用户链路：
+  「start_vision → full_frame 找记事本 → click 打开 → type_text 输入 → get_vision_events
+    回读 → scroll(3) → get_full_frame 最终确认 → stop」。
+4.3 若仍返回 320x180
+  - 说明宿主仍在跑旧 daemon/python 文件（缓存或未完全退出）：
+      · 确认 profile junction 指向工作区（P2 已挂载）；
+      · 任务管理器杀掉残留 python.exe；
+      · 完全退出 DSH 后重开；
+  - 或 VHCU_FORCE_FAKE=1 被误设：检查环境变量并移除。
+4.4 若返回 E_UNAVAILABLE（source=fake）
+  - 说明当前 Python 环境没有 mss 或启动回退 fake：
+      py -3 -m pip install mss
+    然后重启 DSH。
+
+====================================================================
+5. 文件改动
+====================================================================
+【新增】
+  VHCU-P6-02-全屏截图Bug修复-20261031-2133.txt（本报告）
+【修改】（覆盖前已改名 .bak）
+  vision/vhcu_daemon/runner.py     active_source；capture_now 用 active source；返回 source
+                                   （备份 runner.py.bak 为 P6 修复前版本）
+  lib/index.js                     full_frame 拒绝 fake/过小尺寸；VHCU_FORCE_FAKE 测试开关
+                                   （备份 lib/index.js.bak 为 P6 修复前版本）
+  host/test/plugin.test.mjs        source/w/h 断言 + fake 回归用例
+  vision/tests/test_units.py       RunnerCaptureTest
+  package.json / dsh.plugin.json   0.6.1（备份为 0.6.0）
+  README.md                        P6.1 Bugfix 说明 + 测试数
+【未改】
+  input.py / cli.py / contract / client.js / install.mjs（本次与输入/协议无关）
+
+====================================================================
+6. 已知边界
+====================================================================
+R1. fake 源无法产生真实桌面图；现在会明确报 E_UNAVAILABLE，而不是给一张错误的小图。
+R2. 全屏快照要求视觉运行；stop 后 daemon 退出（符合按需唤醒）。
+R3. 仍只支持主屏；多屏/混合 DPI 留 P7。
+R4. 本次只修复全屏路径；ROI 事件仍按差分画布坐标，与点击坐标一致（用户已实测无偏移）。
+
+（报告完）

@@ -1,0 +1,152 @@
+DSH-VHCU  P16.1-01  环境音能量感知（hear.audio）
+生成时间：2026-11-01 17:08 (Asia/Shanghai)
+阶段：P16.1（纯音乐/无口播的听觉反馈）
+前置：P15.1 幻听过滤、P16 上下文宏完成
+
+====================================================================
+0. 结论（先看这 6 条）
+====================================================================
+C1. hear.py 新增 compute_rms()：对切片后的 int16 音频计算归一化 RMS。
+C2. AMBIENT_RMS_THRESHOLD = 0.01；只有 RMS 超阈值才发环境音事件。
+C3. Whisper 转写失败/为空/被幻听过滤/去重为空时，
+    发送轻量事件 hear.audio：
+      {kind:"hear.audio", ts, rms, duration, durationMs, reason}
+C4. Node 转成 [H] 行：
+      🎵 环境音/纯音乐 (音量: 0.15)
+    ring 中 audio:true，UI 用金色斜体区分。
+C5. vhcu_get_hear_events 返回 kind:"hear.audio" + rms + durationMs，
+    大模型能区分“没声音”和“有音乐但没转出字”。
+C6. 测试：Node 56/56、Python 76/76。
+
+====================================================================
+1. Python（vision/vhcu_daemon/hear.py）
+====================================================================
+1.1 常量
+      AMBIENT_RMS_THRESHOLD = 0.01
+1.2 compute_rms(frames, np)
+      samples = int16 / 32768.0
+      rms = sqrt(mean(samples^2))
+      - 空列表 → 0.0
+      - 静音帧 → 0.0
+      - 12000 振幅 → 约 0.366
+1.3 _flush_segment
+      rms = compute_rms(frames, np)
+      duration_ms = len(frames) * 30
+      emit_ambient(reason):
+          if rms < 0.01: return
+          self._emit("hear.audio",
+              ts=now, rms=round(rms,4),
+              duration=round(duration_ms/1000,2),
+              durationMs=duration_ms,
+              reason=reason)
+      触发位置：
+        - transcribe 异常 → reason="transcribe-error"
+        - should_discard_transcript(text) → reason="filtered"
+        - dedupe 后为空 → reason="filtered"
+      成功转出文本 → 只发 hear.text，不发 ambient。
+      低于阈值（真正静音）→ 什么也不发。
+1.4 事件契约
+      event.json enum 增加 hear.audio；
+      oneOf 要求 rms 字段。
+1.5 说明
+      RMS 计算在原始 captured frames 上（不含 0.2s padding），
+      与 duration 语义一致。
+
+====================================================================
+2. Node（lib/index.js）
+====================================================================
+2.1 attachSupervisor 新增 hear.audio：
+      rms = Number(frame.rms)
+      note('hear',
+           `🎵 环境音/纯音乐 (音量: ${rms.toFixed(2)})`,
+           {audio:true, rms, durationMs, reason, source:'loopback'},
+           'info')
+      若 hear 状态不是 listening，顺手锁定为 listening（同 hear.text 的
+      状态自愈逻辑）。
+2.2 ring
+      以 kind:"hear" 存储，audio:true；
+      因此复用 Hear tab、SSE、vhcu_get_hear_events，无需新 tab。
+2.3 vhcu_get_hear_events
+      每条新增：
+        kind: entry.audio ? "hear.audio" : "hear"
+        audio: boolean
+        rms: number|null
+        durationMs
+      render 仍显示 text（🎵…），模型可直接读到 rms。
+      工具描述补充：纯音乐/环境音返回 kind=hear.audio。
+
+====================================================================
+3. UI（lib/client.js）
+====================================================================
+  HearRow 文本 className 增加 vhcu-hear-audio（entry.audio=true）：
+      .vhcu-hear-audio { color:#f0c674; font-style:italic; }
+  显示示例：
+      [17:00:01] H 🎵 环境音/纯音乐 (音量: 0.15)
+  原有折叠/展开、自动滚动、Hear 状态灯保持。
+
+====================================================================
+4. 测试
+====================================================================
+Node 56/56
+  - contract：hear.audio 有效；缺 rms 被拒；
+  - 其余 contract/plugin/client/fusion/macros/guards 保持。
+Python 76/76
+  - AmbientAudioTest：
+      compute_rms([],np)=0；静音=0；12000 振幅>0.1；
+      EmptyModel + 12000 振幅 → 1 条 hear.audio，
+        rms>0.01、durationMs=900、reason=filtered；
+      静音 → events == []（不发）；
+  - HallucinationFilterTest：阈值透传 + [Music] 不 emit 保持；
+  - 原有 P13/P14/P15 用例保持。
+
+====================================================================
+5. 重启验证
+====================================================================
+5.1 完全退出 DSH（无 python.exe/Electron 残留）→ 重开。
+5.2 纯音乐验证
+  1) [H] Hear → 开启听觉；
+  2) 播放“纯音乐 + 动效”视频（无口播或口播很少）；
+  3) 预期 [H] 出现：
+       [时间] H 🎵 环境音/纯音乐 (音量: 0.15)
+     每隔约 8s 或 VAD 切段一条；
+  4) 切到真正静音（暂停视频）→ 不再出现新环境音行；
+  5) 播放有解说视频 → 仍出正常转写，不额外刷环境音。
+5.3 工具验证
+  - vhcu_get_hear_events({limit:10}) 中应含：
+      {"kind":"hear.audio","audio":true,"rms":0.15,"durationMs":8000,
+       "text":"🎵 环境音/纯音乐 (音量: 0.15)"}
+  - 与 hear.text 混合时可按 kind 区分。
+5.4 回归
+  - 幻听过滤仍生效（[Music] 不出现文本）；
+  - 视觉/融合/隐私/坐标钳制/空闲 watchdog/破坏键确认保持。
+
+====================================================================
+6. 文件改动
+====================================================================
+【新增】
+  VHCU-P16.1-01-环境音能量感知-20261101-1708.txt（本报告）
+【修改】
+  vision/vhcu_daemon/hear.py   compute_rms、AMBIENT 阈值、hear.audio、
+                               transcribe 失败/过滤/去重路径
+  vision/tests/test_hear.py     RMS/环境音测试
+  lib/index.js                 hear.audio → Hear ring、工具字段/描述
+  lib/client.js                hear.audio 金色斜体样式
+  contract/schema/v1/event.json hear.audio
+  contract/test/contract.test.mjs hear.audio 校验
+  package.json / dsh.plugin.json 0.22.0
+  README.md                    P16.1 说明
+【备份】
+  hear.py.bak、index.js.bak、client.js.bak、event.json.bak、
+  package.json.bak、dsh.plugin.json.bak、README.md.bak
+
+====================================================================
+7. 已知边界
+====================================================================
+R1. RMS 是整段平均值，不能区分“音乐”与“环境噪声”；只表示有能量。
+R2. 阈值 0.01 是经验值；极轻背景音乐可能低于阈值而不报。
+R3. 环境音事件不更新 P14 空闲 watchdog 的 hear 活动时间（按“无转写文本”
+    仍可能 5 分钟后自动休眠）。
+R4. 环境音不参与 P15 多模态融合，只进 [H] 与 hear 工具。
+R5. 真实纯音乐视频的 RMS/切段节奏需重启后人工验证。
+
+（报告完）

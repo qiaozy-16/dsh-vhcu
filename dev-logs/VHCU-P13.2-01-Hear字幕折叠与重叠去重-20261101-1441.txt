@@ -1,0 +1,153 @@
+DSH-VHCU  P13.2-01  Hear 字幕折叠 + 8s 重叠切片/去重
+生成时间：2026-11-01 14:41 (Asia/Shanghai)
+阶段：P13.2（视觉/听觉模块最终精修）
+前置：P13.1 边缘补字/状态同步完成；主模型已能取 17 段转写并总结
+
+====================================================================
+0. 结论（先看这 6 条）
+====================================================================
+C1. [H] Hear 长文本不再被压成 “H …”：
+    .vhcu-text 改为 flex:1/min-width:0/white-space:pre-wrap/word-break；
+    文本正常换行。
+C2. 默认折叠：超过 3 行（或 >100 字）显示 3 行 + “…”，
+    提供「展开/收起」按钮；展开显示 whisper 原始文本，绝不调用 LLM 总结。
+C3. 强切上限 MAX_SEGMENT_SEC 4.0 → 8.0。
+C4. 滑动窗口：每段切完保留最后 0.5s（OVERLAP_FRAMES=17），
+    作为下一段开头的 Padding；2s 内未续话则丢弃旧 overlap。
+C5. 文本去重：dedupe_overlap() 找上一段结尾与新段开头的最长重合（≥2字），
+    截掉重复；_flush_segment 内集成并更新 _last_text。
+C6. 测试：Node 46/46、Python 64/64；
+    新增 8s 边界、dedupe 正反例、_flush_segment 去重集成。
+
+====================================================================
+1. 任务一：UI 折叠/展开 + 换行修复
+====================================================================
+1.1 换行修复（lib/client.js CSS）
+    .vhcu-line { align-items:flex-start; }
+    .vhcu-text {
+      flex:1; min-width:0;
+      white-space:pre-wrap;
+      word-break:break-word;
+      line-height:1.5;
+    }
+    .vhcu-text.collapsed {
+      display:-webkit-box;
+      -webkit-line-clamp:3;
+      -webkit-box-orient:vertical;
+      overflow:hidden;
+    }
+    .vhcu-more { ... 展开/收起按钮样式 }
+    说明：之前 text 没有 flex:1/min-width:0，长文本在 flex 行里可能被挤压；
+    现在正常占满并换行。
+1.2 HearRow
+    - useState expanded / canExpand；
+    - useRef 指向文本节点；折叠时测量 scrollHeight > clientHeight+2，
+      自动判断是否超过 3 行；
+    - text.length > 100 直接 canExpand；
+    - 默认 class “collapsed”；展开后去掉 clamp；
+    - 按钮「展开/收起」，点击 setExpanded；
+    - title=完整原文；debug 模式仍显示 JSON。
+    - 不调用任何模型/总结接口，只展示 entry.text 原文。
+1.3 自动滚动
+    沿用 P13 的 near-bottom 逻辑；折叠/展开改变高度后，仍跟随最新行。
+
+====================================================================
+2. 任务二：音频重叠与去重
+====================================================================
+2.1 常量（hear.py）
+      SILENCE_SEC = 0.6
+      MAX_SEGMENT_SEC = 8.0
+      OVERLAP_SEC = 0.5
+      OVERLAP_FRAMES = 17   # 510ms
+      PADDING_SEC = 0.2     # P13.1 保留
+2.2 采集循环
+      pending_overlap: list[bytes]
+      自然静音切片 / 8s 强切后：
+          pending_overlap = speech[-OVERLAP_FRAMES:]
+          pending_at = now
+      下一次 voiced 且 speech 为空：
+          if pending_overlap and now - pending_at <= 2.0:
+              speech.extend(pending_overlap)
+          else:
+              speech.extend(preroll)
+          pending_overlap = []
+      - 强切时保留的是真实语音尾部 0.5s，可补边界漏字；
+      - 自然静音切时尾部多为静音，相当于静音 padding；
+      - 超过 2s 未续话丢弃旧 overlap，避免跨句污染。
+2.3 文本去重
+      def dedupe_overlap(previous, current, min_chars=2):
+          for size in range(min(len(prev),len(cur)), 1, -1):
+              if prev[-size:] == cur[:size]:
+                  return cur[size:].strip()
+          return cur
+      _flush_segment:
+          raw = text
+          text = dedupe_overlap(self._last_text, text)
+          if raw != text: print("[hear] dedupe overlap: -N chars")
+          空文本不 emit；否则 self._last_text = text; emit hear.text
+      - 只做后缀/前缀精确去重，不改变 whisper 输出内容；
+      - 最小重合 2 字，避免误删单字。
+2.4 顺序
+      采集 → VAD/8s 强切 → 保留 0.5s → 下一段 → whisper → dedupe → emit。
+
+====================================================================
+3. 测试
+====================================================================
+Node 46/46（现有 UI/控制/契约用例；折叠为浏览器渲染行为）
+Python 64/64：
+  - SILENCE 0.6 / MAX 8.0 / PADDING 0.2 / PADDING_FRAMES 7 /
+    OVERLAP_FRAMES 17；
+  - should_force_cut：266 帧=7.98s False，267=8.01s True；
+  - dedupe_overlap：
+      "促使美国杜鲁门" + "杜鲁门政府宣布" → "政府宣布"；
+      无重合保留原文；单字重合不删；
+  - _flush_segment 集成：上一段结尾“杜鲁门”，新模型输出“杜鲁门政府宣布”，
+    最终 emit "政府宣布"，_last_text 更新；
+  - P13.1 padding/断言保持。
+standalone 脚本可继续用于终端采集诊断（本轮未改其 4s 参数）。
+
+====================================================================
+4. 重启验证
+====================================================================
+4.1 完全退出 DSH（无 python.exe/Electron 残留）→ 重开。
+4.2 [H] Hear → 开启听觉，播放长视频。
+4.3 UI：
+    - 长字幕默认 3 行 + 「展开」按钮；
+    - 点击展开显示完整原文，再点「收起」；
+    - 不再出现 “H …” 或横向截断；
+    - 短句正常一行显示。
+4.4 音频：
+    - 每约 8s 或停顿 0.6s 出字幕；
+    - 日志出现 segment forced at 8.0s（连续解说时）；
+    - 若触发重叠去重，日志出现 [hear] dedupe overlap: -N chars；
+    - 边界句（杜鲁门等）不再漏字。
+4.5 若仍有重复字：
+    - 确认版本 0.17.2；
+    - 看 dedupe 日志；极短重合（1 字）按设计不删。
+
+====================================================================
+5. 文件改动
+====================================================================
+【新增】
+  VHCU-P13.2-01-Hear字幕折叠与重叠去重-20261101-1441.txt（本报告）
+【修改】
+  lib/client.js                HearRow 折叠/展开、CSS 换行修复
+  vision/vhcu_daemon/hear.py   MAX 8s、OVERLAP 0.5s、pending_overlap、
+                               dedupe_overlap、_last_text、日志
+  vision/tests/test_hear.py    8s 边界、dedupe、flush 集成
+  package.json / dsh.plugin.json  0.17.2
+  README.md                    P13.2 说明
+【备份】
+  hear.py.bak、client.js.bak、package.json.bak、dsh.plugin.json.bak、
+  README.md.bak
+
+====================================================================
+6. 已知边界
+====================================================================
+R1. 8s 强切仍可能把句子从中间切开，但 0.5s 重叠 + dedupe 已明显降低漏字。
+R2. 自然静音切的 overlap 是尾部静音，不是语音；主要作用是 padding。
+R3. dedupe 只做精确后缀/前缀匹配；同义改写/标点差异不会删。
+R4. 折叠判断依赖 Chromium -webkit-line-clamp；DSH Electron 支持。
+R5. 未对 UI 展开交互做自动化渲染测试，需重启人工点开确认。
+
+（报告完）

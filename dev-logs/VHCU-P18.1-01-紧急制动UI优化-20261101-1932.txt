@@ -1,0 +1,152 @@
+DSH-VHCU  P18.1-01  紧急制动 UI 与快捷键优化
+生成时间：2026-11-01 19:32 (Asia/Shanghai)
+阶段：P18.1（安全按钮降噪 + 快捷键）
+前置：P18 防注入/紧急制动完成
+
+====================================================================
+0. 结论（先看这 5 条）
+====================================================================
+C1. 移除面板中间的全宽鲜红按钮。
+C2. 改为右上角紧凑图标按钮：与「开启视觉」「⚙」同一行，
+    28×28、红色描边、⏹ 图标。
+C3. DSH 窗口活跃时按 Ctrl+Shift+X 触发紧急制动。
+C4. ⚙ 设置顶部提示“紧急情况可按 Ctrl+Shift+X 强制停止”。
+C5. 底层 taskkill /F /IM python.exe 与
+    POST /vhcu/emergency-stop 完全保留。
+C6. 测试：Node 67/67、Python 88/88。
+
+====================================================================
+1. UI 调整
+====================================================================
+1.1 删除
+      原：
+        .vhcu-emergency { 全宽 9px padding、鲜红背景、12px 粗体 }
+        <button class="vhcu-emergency">🚨 强制停止（紧急制动）</button>
+        （位于 meta 与 tabs 之间，占一整行）
+      现：完全移除该元素与全宽样式。
+1.2 新增 header 图标按钮
+      位置：开启视觉按钮之后、⚙ 设置之前，同一 flex 行。
+      JSX：
+        h('button', {
+          className: 'vhcu-icon-btn vhcu-emergency-btn',
+          title: '紧急制动：停止视觉/听觉并强制结束 Python（Ctrl+Shift+X）',
+          'aria-label': '紧急制动',
+          disabled: busy,
+          onClick: emergencyStop,
+        }, '⏹')
+      CSS：
+        .vhcu-emergency-btn { color:#f87171; border-color:#5b1a1a; }
+        .vhcu-emergency-btn:hover:not(:disabled) {
+          border-color:#dc2626; color:#fecaca;
+        }
+      视觉：
+        - 28×28，与 ⚙ 一致；
+        - 深色底 + 暗红描边 + 浅红图标；
+        - 不再有大面积红色，不吓人；
+        - 悬停才变亮红。
+1.3 设置提示
+      ⚙ 设置标题下新增 hint：
+        “紧急情况可按 Ctrl+Shift+X 强制停止”
+      不占一整块，只是小字提示。
+
+====================================================================
+2. 快捷键
+====================================================================
+2.1 实现（client.js useEffect）
+      window.addEventListener('keydown', handler)
+      handler:
+        key = event.key.toLowerCase()
+        if ((ctrlKey || metaKey) && shiftKey && key === 'x'):
+          preventDefault()
+          if (!event.repeat) emergencyStop()
+      返回时 removeEventListener。
+2.2 触发条件
+      - DSH 窗口处于活动/聚焦状态（前端监听，不是 OS 全局钩子）；
+      - 浏览器/DSH 页面能收到 keydown；
+      - 忽略长按 repeat，避免连发；
+      - busy 时 emergencyStop 内部直接返回。
+2.3 行为
+      与点击图标完全一致：
+        POST /vhcu/emergency-stop
+        → doEmergencyStop
+        → supervisor.stop + taskkill /F /IM python.exe
+        → state 复位。
+2.4 说明
+      未做系统级全局键盘钩子；这是“DSH 窗口活跃时”的前端快捷键，
+      与用户要求一致。
+
+====================================================================
+3. 底层保持
+====================================================================
+  - /vhcu/emergency-stop 路由未改；
+  - sameOrigin + x-vhcu 校验未改；
+  - doEmergencyStop 未改；
+  - taskkill /F /IM python.exe 未改；
+  - 状态复位、note“🚨 紧急制动”未改。
+
+====================================================================
+4. 测试
+====================================================================
+Node 67/67
+  - client.test 更新：
+      source 含 vhcu-emergency-btn；
+      含“紧急制动”；
+      含 Ctrl+Shift+X；
+      含 addEventListener('keydown'；
+      含 emergency-stop；
+      不再含 className: 'vhcu-emergency'（全宽按钮）；
+  - P18 后端集成测试保持：
+      无 x-vhcu → 403；
+      有 x-vhcu → 200、phase=idle、running=false、daemonRunning=false。
+Python 88/88（无改动）
+
+====================================================================
+5. 重启验证
+====================================================================
+5.1 完全退出 DSH（无 python.exe/Electron 残留）→ 重开。
+5.2 外观
+  - 打开 VHCU 面板；
+  - 顶部第一行应只有：状态点、VHCU、阶段、右侧
+    「开启/关闭视觉」、红色描边 ⏹、⚙；
+  - 面板中间不再有全宽红条；
+  - 悬停 ⏹ 显示“紧急制动…” tooltip。
+5.3 点击
+  - 开启视觉；
+  - 点右上角 ⏹；
+  - 预期 running=false、phase=idle、Python 进程结束。
+5.4 快捷键
+  - 让 DSH 窗口保持焦点；
+  - 按 Ctrl+Shift+X；
+  - 应立即触发紧急制动（与点击一致）；
+  - 长按不会连发。
+5.5 设置提示
+  - ⚙ 设置顶部应看到“紧急情况可按 Ctrl+Shift+X 强制停止”。
+5.6 回归
+  - 防注入包裹、控制接口、视觉/听觉、宏库、布局保持。
+
+====================================================================
+6. 文件改动
+====================================================================
+【新增】
+  VHCU-P18.1-01-紧急制动UI优化-20261101-1932.txt（本报告）
+【修改】
+  lib/client.js              删除全宽按钮/样式，新增 header 图标按钮、
+                              Ctrl+Shift+X keydown、设置提示
+  host/test/client.test.mjs  P18.1 断言更新
+  package.json / dsh.plugin.json 0.30.0
+  README.md                  P18.1 说明
+【备份】
+  client.js.bak、client.test.mjs.bak、package.json.bak、
+  dsh.plugin.json.bak、README.md.bak
+
+====================================================================
+7. 已知边界
+====================================================================
+R1. 快捷键仅 DSH 窗口聚焦时有效；不是 OS 全局热键。
+R2. Ctrl+Shift+X 若被宿主/输入法占用，可能收不到 keydown。
+R3. busy（启动/停止中）时点击/快捷键不触发，避免重复请求。
+R4. 图标为 ⏹（停止符号）+ 红色描边，不是高对比大按钮；
+    极端情况下用户需要找到右上角。
+R5. 底层 taskkill 仍会杀掉本机所有 python.exe，这是紧急制动代价。
+
+（报告完）

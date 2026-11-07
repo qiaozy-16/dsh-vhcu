@@ -1,0 +1,139 @@
+DSH-VHCU  P6-03  最终修复报告：max_width 缩放 + 中文 IME 乱序保护
+生成时间：2026-10-31 21:44 (Asia/Shanghai)
+阶段：P6.2（缺陷修复，收官）
+背景：纯血全屏截图与输入链路已跑通；本轮修 2 个实测小瑕疵
+
+====================================================================
+0. 结论（先看这 6 条）
+====================================================================
+C1. 尺寸 Bug 根因不是“砍半逻辑”，而是 render_png 用整数步长最近邻：
+    step = ceil(1920/1600) = 2 → 输出 960x540。修复为按比例采样，
+    1920x1080 + max_width=1600 → **1600x900**（保持宽高比）。
+C2. 实测：真实 mss + 签名 URL + HTTP 取回 PNG，IHDR=1600x900，端到端约 815ms。
+C3. IME 保护：type_text 注入前用 ImmGetOpenStatus 检测前台 IME；若开启，先发 Shift
+    （中英切换）等待 80ms 再注入；返回 imeOpen/imeToggled，Node 同步 ime_open/ime_toggled。
+C4. 兜底：检测失败不阻塞输入；Description 明确提示「中文乱序时提醒用户切英文，或先
+    Ctrl+Z 撤销」。
+C5. 测试：Node 31/31、Python 36/36；新增缩放（1920→1600x900、320 不放大）、
+    PNG 尺寸断言（max_width=800 → 800x450）、IME 检测/字段/描述断言。
+C6. 生效需完全重启 DSH；日志 registered 9 tools。
+
+====================================================================
+1. max_width 缩放 Bug
+====================================================================
+1.1 复现
+  vhcu_get_full_frame(max_width=1600) → frame_url 正确带 maxw=1600，
+  但下载的 PNG 是 960x540（正好 1920x1080 的一半）。
+1.2 根因（vision/vhcu_daemon/httpframe.py render_png）
+  旧实现：
+    step = max(1, ceil(w / max_width))     # 1920/1600 → 2
+    out_w = len(range(0, w, step))          # 960
+    out_h = len(range(0, h, step))          # 540
+  整数步长只能产生 1/k 缩放；step=2 就“砍半”，与 max_width 的期望无关。
+  另外旧实现对裁剪区域也按同一 step 抽样，尺寸不可控。
+1.3 修复
+  out_w = min(w, max_width)
+  out_h = max(1, (h * out_w + w // 2) // w)   # 按宽高比四舍五入
+  src_xs[i] = min(w-1, i*w//out_w)
+  src_ys[j] = min(h-1, j*h//out_h)
+  逐行按映射采样（最近邻），再 encode_png。
+  - 1920x1080, max_width=1600 → (1600, 900)
+  - 320x180, max_width=2000 → (320, 180)（不放大）
+  - 100x50, max_width=25 → 25x13（原有测试语义保持）
+1.4 性能与超时
+  纯 Python 1600x900 采样+编码约 0.5s（实测全链路 815ms）。
+  Node /vhcu/frame 的 fetchFrame 超时从默认 2s 提升到 5s，避免大图偶发超时。
+  仍受 MAX_DIMENSION 8192 与 8MiB 响应上限约束。
+
+====================================================================
+2. 中文 IME 乱序保护
+====================================================================
+2.1 现象
+  中文输入法开启时，逐字符 KEYEVENTF_UNICODE 注入会被 IME 重新组合成候选串，
+  出现乱序/丢字；用户实测只能 Ctrl+Z 撤销后改英文。
+2.2 保护策略（input.py）
+  - 新增 ime_open_status()：
+      GetForegroundWindow → ImmGetContext → ImmGetOpenStatus；
+      只读查询，异常/无 imm32 返回 None，绝不抛错。
+  - type_text 注入前：
+      ime_open = ime_open_status()
+      if ime_open: 发送一次 Shift 切换中英（_tap_vk(SHIFT)），sleep 0.08
+      然后再逐字符注入；
+      返回 {chars, imeOpen, imeToggled}。
+  - dry-run 返回 imeOpen=None、imeToggled=False（不触碰真实 IME）。
+  - 局限：Shift 切换依赖输入法配置（微软拼音默认支持）；少数 IME 用 Ctrl+Space。
+2.3 模型侧兜底（lib/index.js Description）
+  追加：
+    「若输入中文出现乱序/候选框未上屏，请提醒用户切换到英文输入法（或先用
+      vhcu_key_press(["ctrl","z"]) 撤销再重试）；本工具在检测到输入法开启时会先
+      按 Shift 尝试切英文。」
+  Node 返回体新增 ime_open / ime_toggled，并在 message 中标注是否切过英文。
+
+====================================================================
+3. 测试与验证
+====================================================================
+3.1 Node 31/31（contract 10 / supervisor 9 / integration 2 / plugin 7 / client 3）
+  - 全屏用例：max_width=800 → PNG IHDR 宽 800、高 450；source=mss；URL w/h 匹配。
+  - 工具描述断言：type_text 描述含「输入法」「Shift」。
+  - 既有 P6 回归（fake 320x180 拒绝）与 P5 回读门禁保持通过。
+3.2 Python 36/36
+  - FrameScalingTest：1920x1080→1600x900；320x180+max_width=2000 不放大。
+  - ImeTest：ime_open_status 返回 True/False/None 且不抛异常；dry-run 含 IME 字段。
+3.3 真实链路（只抓屏，不注入）
+  max_width=1600 → capture 1920x1080，PNG 1600x900，HTTP 200，~815ms。
+3.4 未自动化
+  真实中文 IME 环境下的 Shift 切换效果（避免干扰用户输入法）；需人工验收。
+
+====================================================================
+4. 重启与验收
+====================================================================
+4.1 重启
+  ① 完全退出 DSH（托盘退出；任务管理器确认无残留 Electron/python.exe）；
+  ② 重新打开 DSH；新开会话；
+  ③ 日志确认：dsh-vhcu: registered 9 tools。
+4.2 验收 A（缩放）
+  「用 vhcu_start_vision 开视觉；调用 vhcu_get_full_frame(max_width=1600)；
+    下载/打开返回的 frame_url，告诉我图片实际宽高；然后 stop。」
+  预期：图片 1600x900（不再是 960x540）。
+4.3 验收 B（IME）
+  - 保持中文输入法开启，让模型 vhcu_type_text 输入一段中文；
+    预期：工具返回 ime_open=true、ime_toggled=true（若检测到），文字正常上屏。
+  - 若仍乱序：按描述提示用户切英文后重试；或先 vhcu_key_press(["ctrl","z"]) 撤销。
+4.4 若仍是 960x540
+  - 宿主仍在跑旧 daemon 文件：确认 profile junction 指向工作区、杀残留 python.exe、
+    完全重启 DSH；
+  - 检查是否被旧 gateway 缓存：重启后重试。
+
+====================================================================
+5. 文件改动
+====================================================================
+【新增】
+  VHCU-P6-03-缩放与IME修复-20261031-2144.txt（本报告）
+【修改】（覆盖前已改名 .bak）
+  vision/vhcu_daemon/httpframe.py   render_png 比例采样；移除整数 step/math
+  vision/vhcu_daemon/input.py       ime_open_status + Shift 切换 + 返回 IME 字段
+  lib/index.js                      type_text 描述警告/IME 字段；frame 代理超时 5s
+  vision/tests/test_units.py        FrameScalingTest（1600x900、不放大）
+  vision/tests/test_input.py        ImeTest
+  host/test/plugin.test.mjs         PNG 800x450 断言；描述含输入法/Shift
+  package.json / dsh.plugin.json    0.6.2
+  README.md                         P6.2 两处修复说明 + 测试数
+【未改】
+  runner.py、cli.py、contract、client.js、install.mjs
+
+备份：httpframe.py.bak、input.py.bak、lib/index.js.bak、test_units.py.bak、
+      test_input.py.bak、plugin.test.mjs.bak、package.json.bak、dsh.plugin.json.bak、
+      README.md.bak（均为本次修改前版本）。
+
+====================================================================
+6. P6 修复汇总（给用户）
+====================================================================
+  P6.0：全屏快照 + 滚轮 + 拖拽 + 强制回读。
+  P6.1：全屏快照固定 320x180（capture_now 用了差分画布 defaults）→ 修 active_source，
+        Node 拒绝 fake/过小尺寸；实测 1920x1080。
+  P6.2（本轮）：
+    - max_width 比例缩放（1600→1600x900，不再是 960x540）；
+    - 中文 IME 乱序保护（检测 + Shift + 描述警告 + 返回字段）。
+  至此 P6 收官：截图尺寸、缩放、输入、回读门禁、回归测试全部通过。
+
+（报告完）

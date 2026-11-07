@@ -1,0 +1,152 @@
+DSH-VHCU  P17.1-01  设置面板布局修复 + 系统基础宏扩充
+生成时间：2026-11-01 19:06 (Asia/Shanghai)
+阶段：P17.1（UI 修整与宏库扩充）
+前置：P16.7 听觉灵敏度热更新完成
+
+====================================================================
+0. 结论（先看这 5 条）
+====================================================================
+C1. ⚙ 设置项改为上下结构：标题在上、控件独占一行。
+C2. 设置项之间增加 12px 间距，修复文字竖排/下拉错位。
+C3. “系统基础宏”新增 8 个全局键盘宏，总数 10 → 18。
+C4. 新宏 target_app 均为空，属于通用宏。
+C5. 测试：Node 65/65、Python 88/88。
+
+====================================================================
+1. 设置面板布局
+====================================================================
+1.1 CSS 修改（client.js）
+      .vhcu-field {
+        display:flex;
+        flex-direction:column;
+        align-items:stretch;
+        gap:5px;
+        padding:7px 0;
+        margin:8px 0;
+        color:#c6d2e2;
+      }
+      .vhcu-field + .vhcu-field { margin-top:12px; }
+      .vhcu-field label {
+        flex:none;
+        font-size:11px;
+        color:#aab6c8;
+        font-weight:600;
+      }
+      .vhcu-field input[type=checkbox] {
+        align-self:flex-start;
+        width:16px;
+        height:16px;
+        accent-color:#4d6bfe;
+      }
+      .vhcu-select {
+        width:100%;
+        box-sizing:border-box;
+        background:#0d1016;
+        color:#d7dee8;
+        border:1px solid #2b3442;
+        border-radius:4px;
+        padding:3px 4px;
+        font:inherit;
+      }
+1.2 效果
+      - 听觉灵敏度：标题一行，下拉框下一行、占满宽度；
+      - 隐私黑名单：标题一行，textarea 下一行、占满宽度；
+      - 调试模式：标题在上，checkbox 在下、左对齐；
+      - 输入法切换：标题在上，select 在下；
+      - 字段之间 12px，面板更清爽。
+1.3 说明
+      .vhcu-field 目前仅用于设置面板（4 处），不影响宏列表/日志行。
+
+====================================================================
+2. 系统基础宏扩充
+====================================================================
+2.1 新增 8 个（host/lib/macros.js seedMacros）
+      name                        steps
+      macro_switch_window         key alt+tab
+      macro_show_desktop          key win+d
+      macro_copy                  key ctrl+c
+      macro_paste                 key ctrl+v
+      macro_undo                  key ctrl+z
+      macro_select_all            key ctrl+a
+      macro_browser_new_tab       key ctrl+t
+      macro_browser_close_tab     key ctrl+w
+2.2 元数据
+      category: 系统基础宏
+      builtin: true
+      enabled: true
+      target_app: null
+      所有步骤仅使用现有 key 原语，无需改 Python。
+2.3 迁移
+      MacroStore.load() 已有 seed 合并逻辑：
+        - 老 macros.json 缺少新宏时自动补入；
+        - 同名旧宏升级为 builtin 分类；
+        - 合并后 persist，无需手删 macros.json。
+2.4 UI
+      ⚙ → 系统基础宏组会显示 18 个宏；
+      新宏全部出现在宏列表，可启用/禁用、可被 vhcu_get_recommended_macros
+      作为通用宏推荐。
+
+====================================================================
+3. 测试
+====================================================================
+Node 65/65
+  - macros.test：
+      store.list().length === 18；
+      8 个新宏均存在、category=系统基础宏、target_app=null、
+      builtin=true、steps[0].op='key'；
+      新增 chord 断言：
+        alt+tab / win+d / ctrl+c / ctrl+v / ctrl+z / ctrl+a /
+        ctrl+t / ctrl+w；
+  - client.test：CSS 含 flex-direction:column 与
+    .vhcu-field + .vhcu-field margin-top:12px；
+  - 其余 63 项保持。
+Python 88/88（本轮无 Python 改动）
+
+====================================================================
+4. 重启验证
+====================================================================
+4.1 完全退出 DSH（无 python.exe/Electron 残留）→ 重开。
+4.2 设置布局
+  - 打开 ⚙ 设置；
+  - “听觉灵敏度”标题在上、下拉框在下并占满一行；
+  - “隐私黑名单”标题在上、输入框在下；
+  - 调试模式、输入法切换同样上下结构；
+  - 项与项之间有明显间距，不再竖排/错位。
+4.3 宏库
+  - ⚙ 设置 → 系统基础宏 → 应看到 18 个宏；
+  - 新增宏可用于 vhcu_run_macro，例如：
+      vhcu_run_macro({name:"macro_copy"})
+      vhcu_run_macro({name:"macro_show_desktop"})
+  - 宏列表中显示“通用”，target_app 为空。
+4.4 推荐
+  - vhcu_get_recommended_macros 在任意窗口应包含新的通用宏。
+4.5 回归
+  - 原 10 个宏、宏组、target_app、听觉灵敏度、隐私、坐标、watchdog 保持。
+
+====================================================================
+5. 文件改动
+====================================================================
+【新增】
+  VHCU-P17.1-01-设置布局与基础宏扩充-20261101-1906.txt（本报告）
+【修改】
+  lib/client.js               .vhcu-field 上下布局、间距、select 100%
+  host/lib/macros.js          seedMacros 新增 8 个全局键盘宏
+  host/test/macros.test.mjs   18 宏/chord/target_app 断言
+  host/test/client.test.mjs   布局 CSS 断言
+  package.json / dsh.plugin.json 0.28.0
+  README.md                   P17.1 说明
+【备份】
+  macros.js.bak、client.js.bak、macros.test.mjs.bak、
+  client.test.mjs.bak、package.json.bak、dsh.plugin.json.bak、
+  README.md.bak
+
+====================================================================
+6. 已知边界
+====================================================================
+R1. macro_switch_window 仅发送一次 Alt+Tab；多窗口循环需多次调用。
+R2. 新宏依赖目标应用接受标准快捷键；游戏/独占全屏可能无效。
+R3. builtin 宏只读，不可编辑/删除，但可启用/禁用。
+R4. 设置布局为 CSS 改动，已做源码级断言；实际视觉效果需重启人工确认。
+R5. 旧 macros.json 会在加载时自动补入新种子宏，不会覆盖用户自定义宏。
+
+（报告完）

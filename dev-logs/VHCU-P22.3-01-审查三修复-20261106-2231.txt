@@ -1,0 +1,148 @@
+DSH-VHCU  P22.3-01  代码审查三处逻辑死角修复
+生成时间：2026-11-06 22:31 (Asia/Shanghai)
+阶段：P22.3（P22.2 后置补丁）
+范围：高危隐私完全放行、宏录制防自噬、紧急制动卸载 uiohook。
+版本：0.41.1
+
+====================================================================
+1. 时间 / 阶段 / 范围
+====================================================================
+  时间：2026-11-06 22:31 +08:00
+  阶段：P22.3
+  背景：代码审查发现 P22.2 有 3 个逻辑死角：
+    1. 开启「无保护截屏」后键鼠仍被隐私保护拦截；
+    2. 宏录制器可能把 AI 宏注入的键鼠事件录进宏（自噬）；
+    3. emergency-stop 未显式卸载 uiohook 全局监听，可能遗留幽灵监听。
+  本轮只修这三点，不扩展其他功能。
+
+====================================================================
+2. 本轮交付物
+====================================================================
+2.1 高危隐私模式完全放行
+    Node：
+      - 新增纯函数 inputAllowedUnderPrivacy(privacyBlocked, unprotected)；
+      - runInputAction 改为：
+        if (!inputAllowedUnderPrivacy(state.privacy?.blocked,
+             settings.privacyUnprotected)) 拒绝；
+      - 即 privacyUnprotected=true 时，截图与键鼠注入同时放行。
+    截图：
+      - vhcu_get_full_frame 仍传 allowUnprotected；
+      - Python capture_now 绕过黑帧，返回真实画面；
+      - 不再生成 masked 基线。
+    UI：
+      - 开关改名为「允许无保护裸奔（截图+键鼠，高危）」；
+      - 二次确认文案改为“敏感窗口截图与键鼠注入均放行”；
+      - 开启后常亮横幅：
+        🔓 当前处于无保护裸奔模式：敏感窗口将完全放行（高危）
+      - 敏感窗口触发时：
+        🔓 当前处于无保护裸奔模式：敏感窗口已放行，AI 可继续操作
+        截图与键鼠均放行（高危）
+2.2 防止宏录制自噬
+    Node：
+      - 新增 isAiInjecting 标志位；
+      - runInputAction 在 supervisor.send 前后置 true/false（保存前值，
+        支持嵌套恢复）；
+      - 覆盖 click/type/hotkey/scroll/drag/macro.run 等全部 AI 注入路径。
+    录制：
+      - 新增纯函数 shouldCaptureInput(isAiInjecting, recordingActive)；
+      - uiohook 的 keydown/mousedown/wheel 回调开头统一过滤：
+        if (!shouldCaptureInput(isAiInjecting, state.recording.active)) return;
+      - AI 宏执行期间的注入事件不会进入 MacroRecorder。
+    紧急制动：
+      - doEmergencyStop 开头置 isAiInjecting=true；
+      - finally 恢复 false，避免制动期间的键盘事件被录制。
+2.3 紧急制动清理监听
+    Node：
+      - 新增 unloadUiohook()：
+        hook.stop() + removeListener(keydown/mousedown/wheel) + 清空全局引用；
+      - stopMacroRecording() 第一行先 unloadUiohook()，
+        即使 state.recording.active=false 也会卸载；
+      - doEmergencyStop() 在杀 Python 前显式 unloadUiohook()；
+      - 插件 cleanup() 复用 unloadUiohook()；
+      - 防止“录制已停但 uiohook 仍挂在后台”的幽灵监听。
+    说明：
+      - 原 stopMacroRecording 只在 active=true 时 stop；现在无条件清理。
+2.4 测试与版本
+    - Node：91/91；
+    - Python：95/95；
+    - 版本：0.41.1；
+    - 新增守卫测试：
+      inputAllowedUnderPrivacy 三态；
+      shouldCaptureInput AI/用户/未录制三态；
+      emergency 源码含 unloadUiohook + stopMacroRecording；
+      无保护裸奔 UI 文案。
+
+====================================================================
+3. 证据
+====================================================================
+3.1 实读源码
+    lib/index.js：
+      inputAllowedUnderPrivacy 条件；
+      isAiInjecting 置位/恢复；
+      shouldCaptureInput 三处回调；
+      unloadUiohook() 定义与 emergency/cleanup 调用；
+    lib/client.js：
+      无保护裸奔标签/二次确认/常亮横幅；
+    host/lib/guards.js：
+      inputAllowedUnderPrivacy、shouldCaptureInput。
+3.2 实测
+    Node 91/91 通过；
+    Python 95/95 通过；
+    新增 P22.3：
+      guards 4 项；
+      plugin 源码行为 1 项；
+      client UI 1 项。
+3.3 未实测
+    - 真实 uiohook 录制时执行 AI 宏，确认录不到注入事件（需本机全局钩子实机）；
+    - 真实 emergency-stop 后用任务管理器确认没有 uiohook 残留线程/进程；
+    - 真实敏感窗口开启无保护裸奔后截图+点击的端到端；
+    - 以上由源码与守卫测试覆盖，但未做真实桌面回归。
+
+====================================================================
+4. 风险与未验证项
+====================================================================
+R1. isAiInjecting 只覆盖经 runInputAction 的 VHCU 注入；
+    其他程序/用户输入不受影响，仍会被录制。
+R2. uiohook 事件回调若在 supervisor ack 之后才到达，存在极小窗口逃逸；
+    Windows 低级钩子通常在 SendInput 同步回调内到达，但未做真实压测。
+R3. 无保护裸奔是真正的高危模式：
+    敏感窗口截图与键鼠都放行；UI 只做常亮提示，不做二次弹窗拦截。
+R4. 紧急制动仍会 taskkill python.exe；
+    本轮只补 uiohook 显式卸载，不改变强杀策略。
+R5. 真实全局钩子/真实敏感窗口未做端到端回归。
+
+====================================================================
+5. 待确认决策（编号）
+====================================================================
+D1. 高危开关改为完全放行（截图+键鼠），UI 使用“无保护裸奔模式”；
+D2. isAiInjecting 采用 boolean + 前值恢复，覆盖当前单层注入；
+D3. 录制回调统一走 shouldCaptureInput；
+D4. emergency-stop 在杀 Python 前先 unloadUiohook；
+D5. stopMacroRecording 无条件卸载监听，即使录制状态异常。
+D6. 真实设备回归由用户在本机执行，本轮不做自动桌面注入。
+
+====================================================================
+6. 下一步计划
+====================================================================
+N1. 完全退出 DSH → 重开，加载 0.41.1。
+N2. 验证高危：
+    - ⚙ 勾选「允许无保护裸奔」→ 二次确认 → 保存；
+    - UI 常亮“当前处于无保护裸奔模式”；
+    - 敏感窗口取图应为真实画面；
+    - 点击/按键应成功注入；
+    - 关闭开关并保存后，恢复黑图与输入拦截。
+N3. 验证录制防自噬：
+    - 开始录制；
+    - 让 AI 执行一个宏/点击；
+    - 停止录制，检查 steps 中没有 AI 注入的键鼠事件；
+    - 用户手动操作仍应被录入。
+N4. 验证紧急制动：
+    - 开始录制；
+    - 触发 Ctrl+Shift+X 紧急制动；
+    - 检查 uiohook 是否停止、无残留监听；
+    - 再次开始录制应正常。
+N5. 回归 P22.2：
+    - 焦点 E_FOCUS_LOST、frame_timestamp E_STALE_FRAME、
+      Hear 重连、30 步上限。
+
+（报告完）

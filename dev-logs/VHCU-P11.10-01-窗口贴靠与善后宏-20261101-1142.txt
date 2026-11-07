@@ -1,0 +1,150 @@
+DSH-VHCU  P11.10-01  窗口贴靠/善后宏 + 拖拽边界
+生成时间：2026-11-01 11:42 (Asia/Shanghai)
+阶段：P11.10（系统基础宏收尾：窗口管理、善后清理、拖拽适用边界）
+前置：P11.9 实机验收通过（参数变量/相对双击）；拖拽在 Explorer 失效为系统限制
+
+====================================================================
+0. 结论（先看这 6 条）
+====================================================================
+C1. 不排查 Explorer 拖拽：记录为 Windows UWP/WebView 屏蔽模拟鼠标拖拽；
+    macro_window_drag 保留（画图等应用内部拖拽可用），描述已注明
+    “不要用它拖拽系统窗口”。
+C2. 新增 macro_snap_window_left（Win+Left）与 macro_snap_window_right（Win+Right），
+    系统窗口排列优先使用快捷键。
+C3. 新增 macro_close_active_window（Alt+F4），并在工具描述中写入善后准则：
+    任务完成后关闭自己临时打开的窗口，保持桌面整洁；不要关闭用户自己的窗口。
+C4. 准则同时写入 vhcu_run_macro 与 vhcu_macro_open_notepad_and_type 的描述。
+C5. 系统基础宏从 7 个增至 10 个；真实 macros.json 已补齐，迁移前备份 .bak-p119。
+C6. 测试：Node 43/43、Python 48/48。
+
+====================================================================
+1. 拖拽边界（无代码行为变更）
+====================================================================
+  macro_window_drag 描述：
+    “按住左键从 ({{x1}},{{y1}}) 拖到 ({{x2}},{{y2}})（支持 is_relative_to_image）。
+     ⚠️ 不要用它拖拽系统窗口（Explorer/UWP/WebView 会屏蔽模拟拖拽）；
+     系统窗口请用 macro_snap_window_left/right。可用于画图等应用内部拖拽。”
+  结论：Explorer 标题栏拖拽失效是目标框架屏蔽 SendInput 拖拽，不是插件 bug；
+  因此不做代码绕过，改为提供系统快捷键宏。
+
+====================================================================
+2. 新增宏（系统基础宏，builtin 只读）
+====================================================================
+  macro_snap_window_left
+    steps: [{op:"key", keys:["win","left"]}]
+    desc: 发送 Win+Left，把当前窗口贴靠到左半屏（移动系统窗口优先用快捷键）
+  macro_snap_window_right
+    steps: [{op:"key", keys:["win","right"]}]
+    desc: 发送 Win+Right，右半屏
+  macro_close_active_window
+    steps: [{op:"key", keys:["alt","f4"]}]
+    desc: 关闭当前活动窗口；仅关闭临时打开的窗口，不要关闭用户自己的窗口；
+          任务完成后请顺手调用，保持桌面整洁。
+
+  说明：Win+Left/Right、Alt+F4 复用现有 key step，无需新增 Python op；
+  parse_hotkey 已支持 win/left/right/alt/f4。
+  推荐用法：
+    左/右半屏 → snap_window_left/right
+    最大化/最小化 → vhcu_key_press(["win","up"]) / ["win","down"]
+    临时窗口善后 → macro_close_active_window
+    画图内部拖拽 → macro_window_drag
+
+====================================================================
+3. 善后行为准则（工具描述）
+====================================================================
+  vhcu_run_macro 描述新增：
+    “**行为准则：任务完成后，如果你临时打开过窗口且不再需要，
+      请顺手调用 macro_close_active_window 关闭它们，保持用户桌面整洁；
+      不要关闭用户自己的窗口。**”
+  vhcu_macro_open_notepad_and_type 描述新增：
+    “任务完成后，若你临时打开了记事本且不再需要，请调用
+      macro_close_active_window 关闭它。”
+  macro_close_active_window 自身描述也写明限制。
+
+====================================================================
+4. 数据迁移
+====================================================================
+  真实 %LOCALAPPDATA%\dsh-vhcu\macros.json 迁移前备份：
+    macros.json.bak-p119（迁移前是 7 个内置宏）
+  迁移后（node 验证）：
+    categories = 系统基础宏(builtin):10 | 我的自定义宏:0
+    macros = save_file | macro_launch_app | macro_create_folder |
+             macro_browser_search | macro_mouse_double_click |
+             macro_mouse_right_click | macro_window_drag |
+             macro_snap_window_left | macro_snap_window_right |
+             macro_close_active_window
+  旧宏保留，新种子缺失自动补齐（load 里按 name ensure seeds）。
+
+====================================================================
+5. 测试
+====================================================================
+Node 43/43（contract10 / supervisor9 / integration2 / plugin12 / client3 / macros7）
+  新增 P11.10：
+    - 种子 10 条；drag 描述含“不要用它拖拽系统窗口”；
+    - vhcu_run_macro 描述含“行为准则”“macro_close_active_window”；
+    - 旧记事本宏描述含 macro_close_active_window；
+    - 三个新宏 dry-run 成功：steps=["key"]、variables=[]。
+Python 48/48
+  新增 parse_hotkey(["win","left"])、["win","right"]、["alt","f4"] 长度校验；
+  原输入/变量/鼠标/IME 用例保持通过。
+
+====================================================================
+6. 重启验证
+====================================================================
+6.1 重启
+  完全退出 DSH（确认 Electron/python.exe 无残留）→ 重开 → 新会话。
+  日志：
+    dsh-vhcu: mounted (routes /vhcu/state|events|control|frame|settings|macros)
+    dsh-vhcu: registered 13 tools
+6.2 宏数量
+  VHCU → ⚙ → 系统基础宏 应显示 10 个宏（新增 3 个）。
+6.3 窗口贴靠
+  1) 打开记事本；
+  2) vhcu_start_vision；
+  3) vhcu_run_macro("macro_snap_window_left") → 记事本靠左半屏；
+  4) vhcu_run_macro("macro_snap_window_right") → 靠右半屏。
+6.4 善后
+  1) vhcu_run_macro("macro_close_active_window") → 当前临时记事本关闭；
+  2) **不要对用户自己的窗口测试 Alt+F4**。
+6.5 拖拽边界
+  - 画图/记事本内部拖拽可用 macro_window_drag；
+  - Explorer 标题栏拖拽仍失败（系统屏蔽），改用 Win+Left/Right。
+6.6 模型行为
+  让模型完成一次“打开记事本输入文字”的任务，观察它是否在完成后主动调用
+  macro_close_active_window 关闭临时窗口（描述已写入准则）。
+
+====================================================================
+7. 文件改动
+====================================================================
+【新增】
+  VHCU-P11.10-01-窗口贴靠与善后宏-20261101-1142.txt（本报告）
+【修改】（覆盖前已改名 .bak）
+  host/lib/macros.js           drag 描述边界；3 个新种子宏
+  lib/index.js                 vhcu_run_macro/旧宏描述加入善后准则与窗口快捷键
+  host/test/macros.test.mjs    种子 10 条、drag 描述断言
+  host/test/plugin.test.mjs    P11.10 窗口宏 + 准则断言
+  vision/tests/test_input.py   win+left/right、alt+f4 parse 用例
+  package.json / dsh.plugin.json  0.14.0
+  README.md                    P11.10 宏表/边界/验收
+【外部数据】
+  %LOCALAPPDATA%\dsh-vhcu\macros.json  已补 3 个窗口宏（10 builtin）
+  备份：macros.json.bak-p119
+【未改】
+  Python input.py/cli.py（复用现有 key op）、contract、client.js、runner.py
+
+====================================================================
+8. 已知边界与下一步
+====================================================================
+R1. Alt+F4 有破坏性，只应对临时窗口使用；描述已警告。
+R2. Win+Left/Right 依赖系统“贴靠窗口”设置开启。
+R3. Explorer/UWP/WebView 屏蔽模拟拖拽为系统限制，非插件 bug。
+R4. 善后准则是工具描述层的引导，不是运行时强制；模型仍可能忘记调用。
+R5. 仍只支持主屏。
+
+P12 建议：
+  N1. 任务结束自动建议/自动清理临时窗口白名单；
+  N2. 窗口级操作（按标题聚焦、最大化）封装成宏；
+  N3. 宏录制器；
+  N4. 多屏坐标空间。
+
+（报告完）

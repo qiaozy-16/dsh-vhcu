@@ -1,0 +1,184 @@
+DSH-VHCU  P12.2.4-01  Hear 离线加载终极修复
+生成时间：2026-11-01 13:17 (Asia/Shanghai)
+阶段：P12.2.4（绝对路径 + local_files_only=True + 启动前清理旧线程/进程/缓存）
+前置：P12.2.3 本地离线优先；用户已清空 models 缓存残留并确认 4 个模型文件
+
+====================================================================
+0. 结论（先看这 6 条）
+====================================================================
+C1. 使用 default_model_dir().resolve() 的绝对路径，直接检查
+      <local-path>
+    每个候选路径都 print：
+      [hear] 检查离线模型路径: ... (model.bin=True/False)
+C2. 命中后调用：
+      WhisperModel(str(absolute_local_dir), device="cpu", compute_type="int8",
+                   local_files_only=True)
+    **不带 download_root、不触发网络、不碰 HF 缓存**。
+C3. 启动线程前清理：
+    - 旧 Hear 线程：start() 检测到存活线程先 stop()/join、释放模型并 gc；
+    - 旧 Python 守护进程：Hear-only 启动时 Node 先重启一次守护进程；
+    - 旧缓存：删除 models/.locks、models/models--Systran--faster-whisper-base、
+      *.incomplete（保留 faster-whisper-base 本地模型）。
+C4. UI 的 loading 提示现在显示 hear.status 的 message（真实检查路径/加载方式），
+    不再只有笼统的“模型加载中”。
+C5. **真机验证通过**（本机依赖已安装）：
+    - load_whisper_model(WhisperModel, models) 离线加载 1.03s；
+    - HearService.start() 6s 内 loading → listening，offline=True，
+      loadedPath=models\faster-whisper-base。
+C6. 测试：Node 45/45、Python 56/56。
+
+====================================================================
+1. 为什么之前会一直黄灯
+====================================================================
+可能原因（按优先级）：
+  a) 点在旧 Python 守护进程上：DSH 未完全退出，旧进程/旧代码仍在跑，
+     即使文件已改，实际执行的还是旧 hear.py；
+  b) 旧 Hear 线程仍持有旧模型/加载状态，没有 stop 就再次 start；
+  c) HF 缓存/锁残留让 huggingface 逻辑卡住（用户已手动清理）；
+  d) 加载失败但错误没有显示到 UI 的 loading 文案里，看起来像“卡黄”。
+本次同时处理 a/b/c，并把 d 的 message 暴露到 UI。
+
+====================================================================
+2. 实现（vision/vhcu_daemon/hear.py）
+====================================================================
+2.1 local_offline_model_dir
+      root = (Path(model_root) or default_model_dir()).expanduser().resolve()
+      for candidate in (root/"faster-whisper-base", root):
+          found = (candidate/"model.bin").is_file()
+          print(f"[hear] 检查离线模型路径: {candidate} (model.bin={found})")
+          if found: return candidate.resolve()
+2.2 load_whisper_model
+      root = ...resolve()
+      print("[hear] 模型根目录(绝对路径): ...")
+      offline = local_offline_model_dir(root)
+      if offline:
+          print("使用本地离线模型加载: <abs>")
+          print("[hear] OFFLINE_MODEL path=<abs> local_files_only=True")
+          model = whisper_model_cls(
+              str(offline), device="cpu", compute_type="int8",
+              local_files_only=True
+          )
+          return model, str(offline), True
+      force_hf_mirror()
+      model = whisper_model_cls("base", ..., download_root=str(root))
+      return model, str(root), False
+2.3 HearService.start
+      if old thread alive:
+          print("[hear] 检测到旧 Hear 线程，先停止并释放模型")
+          self.stop()                    # join + model=None + gc
+      self._model_path = str(default_model_dir().resolve())
+      print("[hear] 模型根目录(绝对路径): ...")
+      cleanup_stale_cache(self._model_path)
+      _import_dependencies()
+      ... 启动 vhcu-hear 线程
+2.4 cleanup_stale_cache
+      - 删除 <root>/.locks
+      - 删除 <root>/models--Systran--faster-whisper-base
+      - 删除 <root>/**/*.incomplete
+      - 每条输出 “[hear] 已清理旧缓存: ...”；不触碰 faster-whisper-base
+2.5 status/message
+      _run 先 emit loading:
+        “检查本地离线模型（models/faster-whisper-base）…”
+      加载后再 emit:
+        offline → “使用本地离线模型加载: <path>”
+        否则   → “本地模型不存在，从 HF 镜像 … 下载”
+      status 含 offline/loadedPath。
+
+====================================================================
+3. Node / UI
+====================================================================
+  - hear.status 映射 message/offline/loadedPath；
+  - Hear-only 启动时，若 supervisor 已 ready 且视觉没开：
+      先 supervisor.stop('hear-restart')，再 ensureDaemonReady，
+      保证用新代码新进程加载；
+  - [H] Hear loading 提示优先显示 message（实际路径/方式），
+    绿色后显示“使用本地离线模型 <path>”。
+
+====================================================================
+4. 真机验证（本机，依赖已装）
+====================================================================
+  依赖：
+    soundcard OK / webrtcvad 2.0.14.post1 / faster_whisper 1.2.1 /
+    ctranslate2 4.8.4
+  模型：
+    models/faster-whisper-base/{model.bin 145MB, config.json,
+    tokenizer.json, vocabulary.txt}
+  直接加载：
+    load_whisper_model(WhisperModel, models)
+    → RESULT ...\faster-whisper-base offline True secs 1.03
+  服务启动：
+    HearService.start() → AFTER6 state=listening, offline=true,
+    loadedPath=...\faster-whisper-base
+    STOP → idle
+  结论：离线加载与监听线程本身正常；黄灯应来自旧进程/旧线程或 UI 未刷新。
+
+====================================================================
+5. 测试
+====================================================================
+Node 45/45
+Python 56/56，新增/更新：
+  - 本地分支 kwargs 断言 local_files_only=True、无 download_root；
+  - cleanup_stale_cache 删除 .locks/旧 HF cache/*.incomplete，
+    保留本地 model.bin；
+  - 原离线/回退/镜像用例保持通过。
+
+====================================================================
+6. 重启验证
+====================================================================
+6.1 必须完全退出 DSH
+  关闭所有 DSH 窗口 → 任务管理器确认没有 python.exe / Electron 残留；
+  否则旧守护进程会继续跑旧代码，仍可能黄灯。
+6.2 重开 → 新会话
+  日志：
+    dsh-vhcu: registered 16 tools
+6.3 [H] Hear → 「开启听觉」
+  预期 daemon stderr：
+    [hear] 模型根目录(绝对路径): <local-path>
+    [hear] 检查离线模型路径: ...\faster-whisper-base (model.bin=True)
+    使用本地离线模型加载: ...\faster-whisper-base
+    [hear] OFFLINE_MODEL path=... local_files_only=True
+  UI：
+    - 黄灯短暂出现后迅速变绿（本机实测加载 1s 级）；
+    - loading 提示显示实际路径；
+    - 绿后显示“使用本地离线模型 ...”。
+6.4 断网验证
+  断开网络后重启 DSH 再开 Hear，仍应变绿（local_files_only）。
+6.5 若仍黄
+  把 UI loading 提示/daemon stderr 的 “[hear] 检查离线模型路径” 行发我；
+  可能原因：
+    - 路径不是 <local-path> 指错）；
+    - 文件不在 faster-whisper-base 子目录；
+    - DSH 仍有旧 python.exe 未退出；
+    - model.bin 损坏/版本不兼容（会在 WhisperModel 内报错）。
+
+====================================================================
+7. 文件改动
+====================================================================
+【新增】
+  VHCU-P12.2.4-01-Hear离线加载终极修复-20261101-1317.txt（本报告）
+【修改】
+  vision/vhcu_daemon/hear.py   绝对路径检查+逐路径 print；
+                               local_files_only=True；
+                               start 前 stop 旧线程；cleanup_stale_cache；
+                               OFFLINE_MODEL 日志；status/message
+  lib/index.js                 Hear-only 启动前重启守护进程；
+                               hear.status 映射 message/offline/loadedPath
+  lib/client.js                loading 显示真实 message/离线路径
+  vision/tests/test_hear.py    local_files_only、缓存清理测试
+  package.json / dsh.plugin.json  0.16.3
+  README.md                    P12.2.4 说明/真机验证
+【备份】
+  vision/vhcu_daemon/hear.py.bak（本轮修改前）
+  package.json.bak / dsh.plugin.json.bak / README.md.bak
+
+====================================================================
+8. 已知边界与下一步
+====================================================================
+R1. 清理旧 HF base 缓存是破坏性的（为满足“清空旧缓存”），本地模型保留；
+    若以后删除本地模型，需要重新下载。
+R2. local_files_only 只对 faster-whisper/HF 加载生效；不改变音频设备。
+R3. 真机验证到 listening，未播放音频验证转写文本。
+R4. 若模型文件损坏，WhisperModel 会抛错，UI 变红灯并显示错误。
+R5. 仍只支持 Windows WASAPI Loopback、base/cpu/int8。
+
+（报告完）

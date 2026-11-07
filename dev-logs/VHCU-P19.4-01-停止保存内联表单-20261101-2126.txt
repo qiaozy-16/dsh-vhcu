@@ -1,0 +1,123 @@
+DSH-VHCU  P19.4-01  停止保存改为内联表单
+生成时间：2026-11-01 21:26 (Asia/Shanghai)
+阶段：P19.4（P19.2 保存流程修复）
+范围：仅前端 lib/client.js 的保存交互；不改 Node 录制引擎与宏保存接口。
+
+====================================================================
+1. 时间 / 阶段 / 范围
+====================================================================
+  时间：2026-11-01 21:26 +08:00
+  阶段：P19.4
+  用户反馈：
+    - 录制成功捕获 21 步；
+    - 点击停止后 UI 报黄字 "prompt() is not supported."；
+    - DSH Electron 禁用 window.prompt()。
+  修复目标：
+    - 彻底移除 window.prompt()；
+    - 用 React 内联表单输入宏名称/分类；
+    - 确认后把已录 steps 写入 macros.json；
+    - 取消/失败不丢已录数据（失败可重试）。
+  范围：
+    - lib/client.js：pendingRecording、macroForm、saveBusy、内联表单；
+    - 测试：client.test 新增无 prompt/表单字段断言；
+    - 不改 lib/index.js。
+
+====================================================================
+2. 本轮交付物
+====================================================================
+2.1 停止流程
+    旧：
+      stop → window.prompt() → 保存 → 刷新
+      （DSH Electron 直接报错，21 步数据无法命名）
+    新：
+      stop → 后端返回 steps
+      → setPendingRecording({steps,step_count,event_count,duration_ms,truncated})
+      → setMacroForm({name: macro_recorded_<timestamp>, category: 我的自定义宏})
+      → 录制条下方内联展开保存表单
+      → 用户编辑名称/分类
+      → 确认保存 → POST /vhcu/macros {action:"save"} → 刷新宏列表
+2.2 表单
+    位置：recordStrip 下方、Tabs 上方（任何标签页可见）。
+    内容：
+      已捕获 N 步 · M 个输入事件 · X 秒
+      宏名称 [默认 macro_recorded_<timestamp>]（自动聚焦）
+      分类   [默认 我的自定义宏]
+      [确认保存] [取消]
+    行为：
+      - Enter 提交（form onSubmit）；
+      - 名称空 → 黄字“宏名称不能为空”，表单保留；
+      - 保存中按钮“保存中…”，禁用重复提交；
+      - 保存失败 → 显示 Node error/hint，表单与已录 steps 保留，可改后重试；
+      - 成功 → 清空 pending、刷新宏列表、表单消失；
+      - 取消 → 清空 pending，提示“已取消保存，本次录制未写入”。
+    截断提示：
+      truncated=true 时摘要追加“⚠ 已达到 50 步上限，后续动作被截断”。
+2.3 状态保护
+    - pendingRecording 存在时，录制条「开始录制宏」禁用，
+      防止未保存数据被新录制覆盖；
+    - 成功开始新录制会清空 pending；
+    - 保存失败不清空 pending；
+    - 不使用 window.prompt / alert / confirm。
+
+====================================================================
+3. 证据
+====================================================================
+3.1 源码
+    lib/client.js：
+      const [pendingRecording,setPendingRecording]=useState(null);
+      const [macroForm,setMacroForm]=useState({name:'',category:'我的自定义宏'});
+      const [saveBusy,setSaveBusy]=useState(false);
+      stopRecording：只停止并 setPendingRecording，不再 prompt；
+      saveRecording：POST /vhcu/macros save，带 steps/category；
+      cancelRecordingSave：清空 pending；
+      recordForm：内联 form，含宏名称/分类/确认/取消；
+      render 顺序：meta → recordStrip → recordForm → tabs → list。
+    grep window.prompt：lib/client.js 无匹配。
+3.2 实测
+    node --check lib/client.js 通过；
+    client.test 新增并通过：
+      - 不存在 window.prompt；
+      - 存在 vhcu-record-form；
+      - 存在 确认保存/取消；
+      - 存在 macroForm.category / 我的自定义宏；
+      - recordForm 在 vhcu-tabs 之前。
+    Node 80/80、Python 88/88。
+3.3 未实测
+    - DSH 真实窗口中表单渲染/输入的视觉与焦点；
+    - 21 步真实录制 → 确认保存 → macros.json 的端到端点击；
+    - 自定义分类在设置面板中的显示。
+
+====================================================================
+4. 风险与未验证项
+====================================================================
+R1. 表单依赖 stop 接口成功返回 steps；若 stop 失败，保留录制状态并报错。
+R2. 取消保存会丢弃本次录制（未写入 macros.json）。
+R3. 表单使用受控 input；输入法组合期间 onChange 可能触发多次，但不会丢字。
+R4. 自定义分类名超长/重复由 MacroStore 的 normalize 报错，表单保留可改。
+R5. 本轮未改录制引擎；21 步转换逻辑仍沿用 P19.2。
+R6. 若重启后仍看到旧 prompt 行为，说明加载的是旧 client bundle，
+    需要完全退出 DSH 再重开。
+
+====================================================================
+5. 待确认决策（编号）
+====================================================================
+D1. 使用内联表单，不使用 modal/prompt/alert。
+D2. 默认分类“我的自定义宏”，允许用户改成任意分类。
+D3. 保存失败保留 pending，允许改名称/分类重试。
+D4. 取消保存丢弃本次录制，并明确提示。
+D5. 保存成功立即刷新宏列表，不自动执行宏。
+
+====================================================================
+6. 下一步计划
+====================================================================
+N1. 完全退出 DSH → 重开。
+N2. 录 21 步 → 点「⏹ 停止并保存」。
+N3. 应出现内联表单：
+      已捕获 21 步 · ...
+      宏名称 / 分类
+      [确认保存] [取消]
+N4. 输入名称（或保留默认）→ 确认保存。
+N5. 打开 ⚙ → 我的自定义宏，确认新宏存在且步骤完整。
+N6. 再测保存失败：重名/空名，确认表单不消失、提示错误。
+
+（报告完）

@@ -1,0 +1,252 @@
+DSH-VHCU  P0-01  总线骨架交付报告（契约 / 守护 / 视觉）
+生成时间：2026-10-31 15:41 (Asia/Shanghai)
+阶段：P0-1 + P0-2 + P0-3（终端跑通，不做 UI）
+决策：D1-D8 全部按推荐 A 执行（用户已确认）
+代码：dsh-vhcu\（4092 行 JS/PY/JSON，运行时零第三方依赖）
+测试：Node 21/21 + Python 18/18 全绿
+
+====================================================================
+0. 本轮结论（先看这 6 条）
+====================================================================
+C1. 总线已真实跑通：Node 守护 spawn Python daemon → READY → ping/sys.info →
+    vision.start(fake) → 差分事件 → 图像面拉取 PNG → vision.stop 后零事件 →
+    shutdown 无僵尸。全程 3.3s（含 4 个差分事件）。
+C2. 三条车道按 D1 落地：stdio NDJSON 控制面 + loopback HTTP 图像面 + （UI 面留 P1）。
+    图像面是拉模式、带 token、限流 2 并发、8 MiB 上限；模型 API 侧仍然只有 JSON。
+C3. 守护层的四个真实坑已修并写进测试：Windows 被杀进程 exitCode 仍为 null（要看 signalCode）、
+    重启后 seq 必须归零重建、READY 才算心跳计时起点、旧 child 的迟到 exit 必须按 child 身份忽略。
+C4. Python 侧协议通道隔离（dup 真 stdout → fd1 指向 stderr）是硬前提：
+    任何库的 print/traceback 都不会污染帧流。这一条没有它，总线迟早会随机错帧。
+C5. 实测（fake 320x180 @8fps）：READY 348-430ms；diff P50 2.3-2.9ms；
+    单帧采集 0.16-0.17ms；shutdown 445-447ms；SIGKILL 后 500ms 退避重启成功、无僵尸。
+    帧图像 126B / 32x32 PNG（ROI 裁剪 + 降采样）。
+C6. mss 真实抓屏未验证：本机 Python 3.13.9 未安装 mss（也没 numpy）。
+    代码已做成可选依赖，缺失时返回 E_UNAVAILABLE + 可执行 hint，不会崩。
+
+====================================================================
+1. 交付物清单
+====================================================================
+dsh-vhcu\
+├─ package.json                 npm scripts（demo / demo:restart / test / test:py）
+├─ README.md                    P0 的范围、跑法、三条车道、已踩的坑
+├─ .gitignore                   .artifacts / __pycache__ / node_modules
+├─ contract\                    协议 v1（唯一真源）
+│  ├─ schema\v1\*.json          8 个 schema：envelope/cmd/ack/ready/event/heartbeat/error/snapshot/shutdown
+│  ├─ golden\*.json             8 个合法帧 + 3 个非法帧（golden fixtures）
+│  ├─ lib\validate.js           零依赖 JSON Schema 子集校验器（$ref/allOf/oneOf/...）
+│  ├─ lib\contract.js           常量、错误码表、帧构造、encode/parse、SeqTracker
+│  └─ test\contract.test.mjs    10 项
+├─ host\                        Node 端
+│  ├─ lib\supervisor.js         单子进程守护（READY/心跳/退避/熔断/三段式停止/exit hook）
+│  ├─ lib\protocol.js           有界 NDJSON 行解码（64KiB，超长丢弃）
+│  ├─ lib\frames.js             图像面客户端（PNG 校验、8MiB 上限、2s 超时）
+│  ├─ lib\python.js             解释器探测（VHCU_PYTHON → py -3 → python → python3）
+│  ├─ lib\log.js                分级日志（stderr；stdout 留给 RESULT）
+│  ├─ cli.mjs                   终端端到端演示 + 故障注入（--kill-after）
+│  ├─ test\supervisor.test.mjs  9 项（用 Node 假 daemon，不依赖 Python）
+│  ├─ test\integration.test.mjs 2 项（真 Python daemon）
+│  └─ test\fixtures\fake-daemon.mjs  协议完整的假 daemon（crash/hang/gap/ignore-shutdown 模式）
+├─ vision\                      Python 端（标准库）
+│  ├─ vhcu_daemon\protocol.py   stdout 隔离、帧构造、入站校验（类型/seq/版本）
+│  ├─ vhcu_daemon\sources.py    FakeSource（默认）/ MssSource（可选，缺依赖友好报错）
+│  ├─ vhcu_daemon\diff.py       粗网格采样差分 + 4 邻域连通域 → ROI（含内容 hash）
+│  ├─ vhcu_daemon\png.py        纯 Python PNG 编码（zlib，RGB）
+│  ├─ vhcu_daemon\httpframe.py  认证 + 限流 + 裁剪/降采样的 loopback 图像面
+│  ├─ vhcu_daemon\runner.py     采集线程、统计、启动/停止状态机
+│  ├─ vhcu_daemon\cli.py        ready / heartbeat / parent-pid 看门狗 / 命令循环
+│  ├─ vhcu_daemon\__main__.py   python -m vhcu_daemon
+│  └─ tests\test_units.py       18 项
+└─ .artifacts\                  demo 落盘的 PNG（已 gitignore）
+
+说明：没有 cordis.patch.yml / dsh 插件清单 —— P0 明确「先不做 UI、不做插件挂载」，
+      避免在协议未冻结前把生命周期绑进宿主。P1 再接 ctx.webServer + betterSidebar。
+
+====================================================================
+2. 验收结果
+====================================================================
+2.1 测试矩阵（全部真实执行）
+  套件                            项数   结果   耗时
+  contract（schema/golden/seq）    10    PASS   ~0.17s
+  host supervisor（假 daemon）      9    PASS   ~3.4s（含故意等待超时）
+  host integration（真 Python）     2    PASS   ~3.4s
+  python unittest                 18    PASS   ~2.06s
+  合计                             39    PASS
+
+  覆盖的故障注入（supervisor 测试）：
+  - READY 超时（daemon 永不 READY）→ start 拒绝 + 自动重试
+  - 命令超时（daemon 不回 ack）→ E_TIMEOUT，daemon 仍可用
+  - 运行中 SIGKILL → 退避重启，READY 新 pid
+  - 连续崩溃 → 熔断 circuit-open，停止 spawn（不 fork 炸弹）
+  - 心跳丢失（进程活着但不发心跳）→ 判死 + 杀 + 重启
+  - 忽略 shutdown 帧 → 升级 SIGTERM/taskkill，stop 仍返回
+  - seq 跳号 → E_SEQ 但不丢 daemon
+  - 未知 op → E_DENIED，不触达 daemon
+
+2.2 端到端实测（本机 Windows 11 / Python 3.13.9 / Node 24.15.0）
+  指标                    运行 1（4 diffs）     运行 2（--kill-after）
+  READY                   348ms                 430ms（重启后 500ms 退避）
+  vision.start → started  1ms                   1ms
+  首个 diff               1553ms                805ms
+  diff P50                2.33ms                2.90ms
+  采集（fake）             0.173ms               0.159ms
+  帧图像                  126B / 32x32 PNG      126B / 32x32 PNG
+  vision.stop 后 600ms    事件数不变            —
+  shutdown                445ms                 447ms
+  僵尸                    false                 false
+  自动重启                —                     true（restarts=1）
+
+  用例：node host/cli.mjs --events 4
+        node host/cli.mjs --events 2 --kill-after --json
+
+2.3 验收对照（P0-2/P0-3 的验收标准）
+  - daemon 被强杀 → 自动重启：✅（500ms 后新 READY）
+  - 连续失败 → 熔断且宿主可用：✅（circuit-open 后 spawns 不再增长）
+  - vision.stop 后 0 采集：✅（600ms 事件数不变；线程 join）
+  - 心跳丢失判死：✅（心跳阈值可配，测试用 60ms×2）
+  - 无僵尸：✅（stop 后 process.kill(pid,0) 抛错）
+  - 差分延迟 P50 ≤ 15ms：✅（2.3-2.9ms，fake 320x180）
+
+====================================================================
+3. 决策 → 代码的落地对照
+====================================================================
+D1-A 总线三车道
+  控制面  stdio NDJSON：host/lib/protocol.js + vision/vhcu_daemon/protocol.py
+          帧最大 64KiB；超长行丢弃并报 E_PROTO；命令白名单在两侧各校验一次。
+  图像面  loopback HTTP：vision/vhcu_daemon/httpframe.py
+          GET /health、GET /frame?token=&x=&y=&w=&h=&maxw=
+          token 用 hmac.compare_digest；并发信号量 2；8 MiB 上限由客户端再兜一层。
+  UI 面   P1（宿主 ctx.webServer 同源 SSE），P0 未做。
+D2-A 原生侧边栏：P1；P0 不引入任何 UI 依赖。
+D3-A mss 起步：MssSource 已实现，但本机未装 mss → 运行时报 E_UNAVAILABLE；
+      默认 fake 保证 CI/无依赖环境可跑。
+D4-A 触发闸门：P0 的等价物是「显式 start/stop」，vision.stop 后线程退出、零采集；
+      会话级 active 检测在 P1 做。
+D5-A 用户 venv：resolvePython 优先 VHCU_PYTHON / --python，其次 py -3 / python / python3；
+      探测拒绝非 Python 3 与 Store 占位解释器。
+D6-A 音源择一：P0 未接 Hear；总线与 seq 语义已为 P1 留位（事件 kind 可扩展）。
+D7-A 模型消费：P0 未接模型；差分事件只含事实字段（坐标/分数/hash/耗时），无自然语言。
+D8-A 命名：包 dsh-vhcu、模块 vhcu_daemon、服务前缀 vhcu、RESULT 行机器可读。
+
+====================================================================
+4. 六个真实踩坑（本轮实际发生并修复，建议写进团队规范）
+====================================================================
+K1. Windows 上被信号杀死的子进程 exitCode === null
+    Node 的 child.exitCode 在 TerminateProcess/SIGKILL 后仍是 null，只有 signalCode 非空。
+    只用 exitCode 判断「已退出」→ _waitForExit 会在 exit 之后继续挂 500ms 再挂 1s，
+    最终误报「daemon survived SIGTERM/taskkill」且 stop() 永不 resolve。
+    修复：hasExited(child) = exitCode !== null || signalCode !== null（supervisor.js:32）。
+
+K2. 重启后 seq 从 1 开始，旧 SeqTracker 把新 READY 当 duplicate 丢掉
+    表现：重启后 supervisor 永远到不了 ready，日志只有 E_SEQ duplicate seq 1。
+    修复：每次 _spawn 重建 daemonSeq = new SeqTracker('daemon')。
+    这条是「进程内状态」和「连接级状态」混淆，任何长连接协议都会遇到。
+
+K3. READY 之前 lastHeartbeatAt=0，看门狗永远不触发
+    表现：daemon 活着但一个心跳都不发，host 认为一切正常。
+    修复：READY 时把 lastHeartbeatAt 设为当前时间（silence 从 READY 起算）。
+
+K4. 旧 child 的迟到事件污染新 child 的状态
+    kill 是异步的，退避重启可能在旧进程 exit 之前就 spawn 新进程；
+    旧 stdout/exit 事件若不做身份校验，会把 this.child 置空、把新 READY 丢掉。
+    修复：所有 child 事件绑定 child 形参；_onExit 首行 this.child !== child 直接忽略。
+    另加 expectingExit 标记：由我们主动 kill 引发的 exit 不再计为第二次失败，
+    否则熔断会在 1 次真实崩溃时被提前触发。
+
+K5. 「ack 后再等 started 事件」会丢事件
+    表现：CLI 偶发 timeout waiting for vision.started，重跑又好了。
+    原因：daemon 在同一个 tick 里先 ack 再 event；await ack 恢复后监听器才挂上。
+    修复：先注册监听、再发命令（cli.mjs 有注释）。凡是「命令-事件」同源协议都要这样写。
+
+K6. shutdown 帧回 ack 时 cmdId 为空 → 自己把自己判成 E_PROTO
+    协议 schema 要求 ack.cmdId ≥1；shutdown 帧没有 id。
+    修复：shutdown 不 ack，直接退出（host 的 stop 本来就不等 ack）。
+    教训：为「省一个字段」放宽必填，比让协议多一种合法形态更危险。
+
+====================================================================
+5. 已知边界（P0 明确没做，不要误以为已完成）
+====================================================================
+B1. mss 未验证：本机无 mss/numpy。MssSource 代码已写，但「真实抓屏 → 差分」这条链路
+    需要用户在 venv 里 pip install mss 后跑 `node host/cli.mjs --source mss` 才能验收。
+B2. 差分是「采样网格 + 只比较单像素」，对 1px 细线/亚像素滚动可能漏检；
+    P1 再引入按 ROI 精算（或 numpy 加速）与阈值自适应。
+B3. 图像面只发 PNG、不做 I/P 帧编码与增量传输；当前每次拉取都是整块 ROI。
+B4. 无单实例锁：两个 host 同时跑会各自 spawn 一个 daemon（P1 接宿主时加 lockfile）。
+B5. 无认证的命令来源绑定：stdio 是父子私有管道，安全边界等于「能 spawn 我的人」；
+    图像面有 token，但没有速率计费/审计日志（P1 补）。
+B6. 心跳/命令的时钟是墙钟（Date.now），跨休眠恢复可能出现一次误判（已有 3 次容忍）。
+
+====================================================================
+6. 下一步（建议顺序）
+====================================================================
+N4. 在 venv 装 mss → 跑 --source mss，测真实 1080p/2K 下 capture/diff/CPU 三张表，
+    替换本报告 2.2 的 fake 数据；若 P50 diff > 15ms，再加 numpy 快速路径或降 step。
+N5. 包装成 DSH 插件：cordis.patch.yml + dsh.plugin.json + ctx.webServer 路由 +
+    betterSidebar tab（只读状态灯 + 缩略图），把 Supervisor 挂到 ctx.effect 的 dispose。
+N6. 单实例锁 + 日志落盘（%LOCALAPPDATA%\dsh-vhcu\logs）。
+N7. Hear：VAD 切段 + faster-whisper 常驻，复用同一条总线（事件 kind=hear.segment）。
+N8. 执行层：宏 + 视觉寻址兜底（先用 ROI→坐标，不碰任意代码执行）。
+
+====================================================================
+7. 复现命令（本机已实测）
+====================================================================
+cd dsh-vhcu
+npm test                                # 21 项 Node（contract 10 + host 9 + integration 2）
+npm run test:py                         # 18 项 Python
+npm run demo                            # 端到端，输出 RESULT JSON
+npm run demo:restart                    # SIGKILL → 自动重启验证
+node host/cli.mjs --source mss --events 2   # 需 mss；当前会返回 E_UNAVAILABLE + hint
+
+RESULT 示例（实测）：
+{"ok":true,"python":"Python 3.13.9","readyMs":348,"visionStartMs":1,"firstDiffMs":1553,
+ "p50DiffMs":2.33,"captureMs":0.173,"diffs":4,"frameBytes":126,"shutdownMs":445,
+ "restarted":null,"zombie":false,"elapsedMs":3291}
+
+====================================================================
+8. 局限与诚实说明
+====================================================================
+L1. 本轮所有「真实抓屏」相关结论都未验证（无 mss）；2.2 的数据全部来自 fake 源，
+    只证明总线/守护/差分算法本身，不证明真实屏幕性能。
+L2. 差分阈值（14）与网格（≤100 格）是工程初值，未经真实屏幕调参。
+L3. 测试覆盖了协议与生命周期，但没有压力测试（长时间运行、内存增长、前端断连重连）。
+L4. Hindsight initiative 记录失败（API 401，未配置 apiToken）；已改用本地记忆库
+    memory_submit 落盘，不影响本轮交付。
+L5. Node 测试里 `--test` 的目录参数在当前 Node 24 上不可用，npm script 已改为引号 glob。
+
+====================================================================
+附录 A：本轮聊天窗口回复原文（归档）
+追加时间：2026-10-31 15:41
+====================================================================
+P0 三块已交付并在终端跑通（无 UI）。代码在 dsh-vhcu\，总计 4092 行、运行时零第三方依赖。
+
+交付：
+1) vhcu-contract：8 个 JSON Schema + golden fixtures + 零依赖校验器 + SeqTracker；
+   错误码表带 hint。10 项测试。
+2) vhcu-host：Supervisor（spawn/READY/心跳看门狗/指数退避/熔断/三段式停止/exit hook）
+   + 有界 NDJSON 解码 + Python 解释器探测 + 图像面客户端；9 项生命周期测试 + 2 项真 Python 集成测试。
+3) vhcu-vision：Python 守护（stdout 协议隔离、fake 源、粗网格差分→ROI、纯 Python PNG、
+   带 token 的 loopback 图像面、parent-pid 看门狗、心跳、命令循环）；18 项单测。
+
+实测（fake 320x180 @8fps）：
+- READY 348-430ms；diff P50 2.3-2.9ms；采集 0.16ms；shutdown 445ms；无僵尸
+- SIGKILL 后 500ms 退避重启成功（restarts=1）
+- 图像面拉到 32x32 PNG（126B）
+- vision.stop 后 600ms 事件数不变（证明不空转）
+
+本轮修掉的 6 个真坑（细节在报告第 4 节）：
+Windows 被杀进程 exitCode=null（要看 signalCode）；重启后 seq 必须归零；
+心跳计时从 READY 起算；旧 child 迟到事件必须按身份忽略；命令-事件同源要先挂监听再发命令；
+shutdown 不要回空 cmdId 的 ack。
+
+没做/未验证：真实 mss 抓屏（本机没装 mss）、UI、单实例锁、Hear、执行层。
+
+下一步建议：装 mss 跑真实 1080p 三张表（capture/diff/CPU）→ 再接 better-sidebar tab。
+
+报告：VHCU-P0-01-总线骨架交付-20261031-1541.txt
+
+====================================================================
+附录 B：本轮记忆写入
+====================================================================
+memory_submit 记录：dsh-vhcu P0 交付事实、三条车道、六个踩坑、mss 未验证、demo 命令。
+（Hindsight capture 因未配置 apiToken 返回 401，已跳过。）
+
+（报告完）

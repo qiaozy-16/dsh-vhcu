@@ -1,0 +1,160 @@
+DSH-VHCU  P12.2.3-01  Hear 优先加载本地离线模型
+生成时间：2026-11-01 13:10 (Asia/Shanghai)
+阶段：P12.2.3（跳过下载：本地 faster-whisper-base 存在时完全离线加载）
+前置：P12.2.1 HF 镜像；用户已手动下载模型到
+      dsh-vhcu\models\faster-whisper-base
+
+====================================================================
+0. 结论（先看这 5 条）
+====================================================================
+C1. 加载前先检查本地模型：
+      <models root>/faster-whisper-base/model.bin
+      或 <models root>/model.bin（VHCU_MODEL_PATH 直接指向模型目录）
+    存在 → 直接 WhisperModel(str(local_dir), device="cpu", compute_type="int8")；
+    **不带 download_root、不触发任何网络请求**。
+C2. 本地文件不存在 → 回退原逻辑：base + download_root + 强制 hf-mirror.com。
+C3. 明确日志（stderr）：
+      使用本地离线模型加载: <local-path>
+    同时 hear.status message 也带该文案。
+C4. status 增加 offline / loadedPath；UI 提示“使用本地离线模型 …”。
+C5. 本机验证：
+      local_offline_model_dir() = dsh-vhcu\models\faster-whisper-base
+      model.bin exists = True
+    测试：Node 45/45、Python 55/55。
+
+====================================================================
+1. 实现（vision/vhcu_daemon/hear.py）
+====================================================================
+1.1 新增 local_offline_model_dir(model_root=None)
+      root = Path(model_root) if model_root else default_model_dir()
+      for candidate in (root / "faster-whisper-base", root):
+          if (candidate / "model.bin").is_file():
+              return candidate
+      return None
+    兼容两种布局：
+      models/faster-whisper-base/model.bin   ← 本次用户放置
+      models/model.bin                       ← VHCU_MODEL_PATH 指向模型目录
+1.2 新增 load_whisper_model(whisper_model_cls, model_root)
+      offline = local_offline_model_dir(model_root)
+      if offline:
+          print(f"使用本地离线模型加载: {offline}", file=sys.stderr, flush=True)
+          model = whisper_model_cls(
+              str(offline), device="cpu", compute_type="int8"
+          )                                  # 无 download_root
+          return model, str(offline), True
+      force_hf_mirror()                      # 仅下载分支
+      model = whisper_model_cls(
+          MODEL_NAME, device="cpu", compute_type="int8",
+          download_root=str(root)
+      )
+      return model, str(root), False
+1.3 HearService._run
+      - 先 emit loading：“检查本地离线模型（models/faster-whisper-base）…”
+      - 调 load_whisper_model(...)
+      - 再 emit loading message：
+          offline=True  → “使用本地离线模型加载: <path>”
+          offline=False → “本地模型不存在，从 HF 镜像 … 下载到 …”
+      - 记录 self._offline / self._loaded_path
+      - 继续 listening / capture。
+1.4 status 新增
+      "loadedPath": 实际加载路径
+      "offline": bool
+      （modelPath 仍是 models 根目录）
+1.5 Node/UI
+      hear.status 映射 offline/loadedPath；
+      [H] Hear 提示：
+        offline → “使用本地离线模型 <loadedPath>”
+        否则     → 镜像下载/模型目录提示。
+
+====================================================================
+2. 本机验证（只读检查，未加载 whisper）
+====================================================================
+  py -3 检查：
+    OFFLINE_DIR
+      <local-path>
+    MODEL_BIN True
+  目录内容（用户提供）：
+    model.bin (145MB), config.json, tokenizer.json, vocabulary.txt
+  结论：重启后应走离线分支，不再联网。
+
+====================================================================
+3. 测试
+====================================================================
+Node 45/45（状态映射/UI 无破坏）
+Python 55/55，新增 OfflineModelTest：
+  - 本地存在：
+      local_offline_model_dir(tmp) 命中 faster-whisper-base；
+      load_whisper_model 传入 FakeWhisper：
+        args[0] = 本地绝对路径；
+        kwargs 无 download_root；
+        offline=True；loaded_path 正确。
+  - 本地缺失：
+      offline=False；
+      args[0]="base"；kwargs.download_root=tmp；
+      HF_ENDPOINT == https://hf-mirror.com。
+  - 原 P12.1/P12.2 用例保持通过。
+未验证：真实 faster-whisper 加载 145MB 模型与音频转写
+（依赖仍未安装）；需重启后按第 4 节验收。
+
+====================================================================
+4. 重启验证
+====================================================================
+4.1 重启
+  完全退出 DSH（确认 Electron/python.exe 无残留）→ 重开 → 新会话。
+  日志：
+    dsh-vhcu: mounted (routes /vhcu/state|events|control|frame|settings|macros)
+    dsh-vhcu: registered 16 tools
+4.2 开启 Hear
+  VHCU → [H] Hear → 「开启听觉」。
+  预期：
+    - 守护进程 stderr/DSH 日志出现：
+        使用本地离线模型加载: <local-path>
+    - 状态点：黄 loading（应很快）→ 绿 listening；
+    - 不应再出现 Hugging Face 下载等待/网络超时。
+4.3 验证没有联网下载
+  - 观察 models\models--Systran--faster-whisper-base 是否不再增长；
+  - 断网后重启并开启 Hear，也应能变绿（模型完整时）。
+4.4 转写
+  播放系统外放音频 → [H] 出现文本 / vhcu_get_hear_events 有事件。
+4.5 若仍失败
+  - 检查路径是否为 models\faster-whisper-base\model.bin（区分大小写不敏感）；
+  - 确认四个文件齐全（model.bin/config.json/tokenizer.json/vocabulary.txt）；
+  - 查看 daemon stderr 的 “使用本地离线模型加载” 是否出现；
+  - 若报模型损坏，重新从镜像下载完整目录；
+  - 若 VHCU_MODEL_PATH 指向了别的目录，请把模型放到该目录下或删除该环境变量。
+
+====================================================================
+5. 文件改动
+====================================================================
+【新增】
+  VHCU-P12.2.3-01-本地离线模型-20261101-1310.txt（本报告）
+【修改】
+  vision/vhcu_daemon/hear.py   local_offline_model_dir/load_whisper_model；
+                               离线分支无 download_root；print 日志；
+                               status offline/loadedPath；loading 文案
+  lib/index.js                 hear.status 映射 offline/loadedPath
+  lib/client.js                offline 提示“使用本地离线模型 …”
+  vision/tests/test_hear.py    OfflineModelTest（本地/回退）
+  package.json / dsh.plugin.json  0.16.2
+  README.md                    P12.2.3 离线优先说明/测试数
+【备份】
+  vision/vhcu_daemon/hear.py.bak（P12.2.1 修改前版本，沿用）
+  package.json.bak / dsh.plugin.json.bak / README.md.bak
+
+====================================================================
+6. 已知边界与下一步
+====================================================================
+R1. 只识别 model.bin 判断目录完整；文件损坏/版本不匹配会在 WhisperModel 内报错。
+R2. 本地目录名固定 faster-whisper-base；自定义目录可通过 VHCU_MODEL_PATH 指向
+    包含 model.bin 的目录。
+R3. 离线分支不再设置下载相关；只有回退分支强制 hf-mirror。
+R4. 真实模型加载与音频转写未验证（依赖未安装）。
+R5. 模型文件很大（145MB），首次 import/加载可能有数秒耗时。
+
+P12.3 建议：
+  N1. 模型文件校验（sha256/大小）；
+  N2. UI 显示离线/在线来源徽标；
+  N3. 下载进度/失败重试；
+  N4. Hear 设备/语言配置。
+
+（报告完）

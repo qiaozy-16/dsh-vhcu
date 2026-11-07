@@ -1,0 +1,171 @@
+DSH-VHCU  P16.3-01  精准幻听过滤 + fps 等待态 + 音频尖峰
+生成时间：2026-11-01 17:50 (Asia/Shanghai)
+阶段：P16.3（幻听误杀修复 / 0fps 回显 / 瞬时音效）
+前置：P16.2 短幻听过滤、环境音融合完成
+
+====================================================================
+0. 结论（先看这 7 条）
+====================================================================
+C1. 短词丢弃改为三条件同时满足：
+      a) 文本是短词（You / Thank you / Music / The / H.A.R.D. 等）；
+      b) 音频时长 <3.0s；
+      c) no_speech_prob >0.6 或平均 RMS <0.05。
+C2. 大声清晰的 "You"（低 no_speech_prob、高 RMS）不会被丢弃。
+C3. 纯标点/纯 annotation 标签（[Music] 等）仍直接丢弃；不影响真实语音。
+C4. 视觉首帧差分前，fps 显示 `-- 等待中`，不再显示 0。
+C5. RMS 尖峰检测：峰值帧 >0.2 且 >平均×3 → has_spike:true。
+C6. Node/UI/融合层对 has_spike 追加 `💥 巨响/音效`。
+C7. AMBIENT_RMS_THRESHOLD 0.01 → 0.03。
+C8. 测试：Node 60/60、Python 80/80。
+
+====================================================================
+1. 任务一：精准幻听过滤
+====================================================================
+1.1 常量
+      SHORT_SEGMENT_SEC = 3.0
+      SHORT_LOW_RMS = 0.05
+      SHORT_NO_SPEECH = 0.6
+      _SHORT_PHRASES = {
+        you, thankyou, music, themusic, the, hard, i, oh, uh, um,
+        yeah, okay, ok, a, an, and, is, it, this, that, we, he, she,
+        they, me, my, to, of, hover, applause
+      }
+1.2 归一化
+      _short_phrase_key:
+        - 去掉 [Music] 等标签；
+        - 去掉标点/空格并 casefold：
+            "Thank you" → "thankyou"
+            "H.A.R.D."  → "hard"
+            "The Music" → "themusic"
+1.3 should_discard_transcript(text, duration, no_speech_prob, rms)
+      硬丢弃：
+        - 空文本；
+        - 去掉标签后没有任何字母/数字（纯标点/符号/♪）；
+        - 只有 annotation 标签（[Music]/[Applause]/[Hover]）。
+      短词丢弃（必须同时满足）：
+        - key 在 _SHORT_PHRASES；
+        - duration < 3.0s；
+        - no_speech_prob >0.6 或 rms <0.05。
+      其他文本一律保留（中文/英文/韩语/日语/带上下文短句）。
+1.4 no_speech_prob 来源
+      faster-whisper 的 segment.no_speech_prob；
+      多 segment 取最大值；缺失按 0。
+      transcribe 参数保持 no_speech_threshold=0.6 / log_prob_threshold=-1.0。
+1.5 示例
+      1.5s "You"，no_speech=0.9，rms=0.2 → 丢弃；
+      1.5s "You"，no_speech=0.1，rms=0.2 → 保留（大声清晰）；
+      1.5s "You"，no_speech=0.1，rms=0.01 → 丢弃（低能量）；
+      3.5s "You"，no_speech=0.9，rms=0.01 → 保留（超时长保护）；
+      "I think so"、"请打开设置" → 保留。
+
+====================================================================
+2. 任务二：修复视觉 0fps 回显
+====================================================================
+  client.js 顶部 meta：
+    fpsLabel =
+      !state.running            → '—'
+      diffs === 0               → '-- 等待中'
+      state.fps > 0             → state.fps
+      否则                      → '--'
+  首帧真实差分到达后，counter.diffs > 0，才显示 fps 数值。
+  启动中不再出现误导性的 0。
+
+====================================================================
+3. 任务三：瞬时音效捕捉
+====================================================================
+3.1 compute_rms_stats 返回四元组
+      (rms, rms_max, rms_min, has_spike)
+      has_spike = rms_max > 0.2 且 rms_max > max(0.2, rms*3)
+      说明：需求原文“帧 RMS 大于 rms_max*3”在数学上不可能
+      （rms_max 已是最大帧）；这里按等价意图实现为
+      “峰值至少是平均的 3 倍，且超过绝对阈值 0.2”。
+3.2 hear.audio 增加
+      has_spike: true/false
+3.3 Node
+      - [H] 文本：🎵 环境音/纯音乐 (音量: 0.08) 💥 巨响/音效
+      - ring 保存 has_spike；
+      - fusion.pushAudio({hasSpike})。
+3.4 Fusion
+      - 窗口内任一音频 has_spike → 融合事件 has_spike:true；
+      - hear_text 追加 [环境音 RMS:0.08 💥 巨响/音效]；
+      - M 行随 hear_text 显示；
+      - vhcu_get_multimodal_events 返回 has_spike。
+3.5 阈值
+      AMBIENT_RMS_THRESHOLD = 0.03：
+      RMS <0.03 的极微弱底噪不再发 hear.audio。
+
+====================================================================
+4. 测试
+====================================================================
+Node 60/60
+  - fusion +1：has_spike 音频 → 事件 has_spike:true、
+    hear_text/text 含 💥 巨响/音效；
+  - client +1：源码包含 `-- 等待中` 与 diffs===0 判断；
+  - contract hear.audio 保持；
+  - 其余保持。
+Python 80/80
+  - 短词三条件：
+      You @1.5/0.9/0.2 → 丢；You @1.5/0.1/0.2 → 留；
+      You @1.5/0.1/0.01 → 丢；You @3.5/0.9/0.01 → 留；
+      H.A.R.D. @1.5/0.8/0.2 → 丢；
+  - 硬丢弃：空/标点/[Music]/[Hover]；
+  - 保留：I think so / You know what / 请打开设置 / 你好世界；
+  - compute_rms_stats 四元组：20 静音+1 响帧 → has_spike true；
+  - hear.audio 带 rms_max/rms_min（沿用）。
+
+====================================================================
+5. 重启验证
+====================================================================
+5.1 完全退出 DSH（无 python.exe/Electron 残留）→ 重开。
+5.2 视觉 fps
+  - 点击开启视觉；
+  - 首帧差分前，顶部应显示 `fps -- 等待中`，不是 0；
+  - 画面变化后应变成实际 fps。
+5.3 幻听误杀
+  1) [H] Hear 开启；
+  2) 对麦克风/系统清晰说 "You"（或播放清晰人声 You）；
+     若 RMS 高、no_speech 低，应保留；
+  3) 播放纯音乐，2-3 秒的 You/The 片段应被丢弃，
+     但出现 🎵 环境音行；
+  4) 说 "I think so" 应保留。
+5.4 尖峰
+  - 播放有爆炸/枪声/鼓点的视频；
+  - [H] 行应出现 `💥 巨响/音效`；
+  - [M] 融合行（若同窗口有视觉）也应出现 `[环境音 RMS:x 💥 巨响/音效]`；
+  - vhcu_get_hear_events 的 hear.audio 应含 has_spike:true、rms_max 明显高。
+5.5 底噪
+  - 极安静/微弱底噪不应再刷环境音行（阈值 0.03）。
+5.6 回归：隐私、坐标、融合、watchdog、破坏键确认保持。
+
+====================================================================
+6. 文件改动
+====================================================================
+【新增】
+  VHCU-P16.3-01-精准过滤与音频尖峰-20261101-1750.txt（本报告）
+【修改】
+  vision/vhcu_daemon/hear.py   三条件短词过滤、no_speech_prob、
+                               has_spike、阈值 0.03
+  vision/tests/test_hear.py     三条件/尖峰/四元组测试
+  host/lib/fusion.js            pushAudio hasSpike、hear_text 💥、has_spike
+  host/test/fusion.test.mjs     尖峰融合用例
+  lib/index.js                  hear.audio has_spike、工具字段
+  lib/client.js                 fps '-- 等待中'
+  host/test/client.test.mjs     fps 等待态
+  package.json / dsh.plugin.json 0.24.0
+  README.md                     P16.3 说明
+【备份】
+  hear.py.bak、fusion.js.bak、index.js.bak、client.js.bak、
+  package.json.bak、dsh.plugin.json.bak、README.md.bak
+
+====================================================================
+7. 已知边界
+====================================================================
+R1. 短词过滤依赖 no_speech_prob；某些模型/版本缺失时按 0 处理，
+    低 RMS 仍可触发。
+R2. 3.0s 以上短词不丢弃，可能仍有长段幻听。
+R3. has_spike 用平均×3 代替原文不可实现的 max×3；
+    极短爆发若拉高平均值可能不触发。
+R4. 1-2 个汉字不再无条件丢弃；只在短词集合内（当前不含中文）才受控。
+R5. 真实人声 "You" 的 no_speech_prob 行为需实机确认。
+
+（报告完）

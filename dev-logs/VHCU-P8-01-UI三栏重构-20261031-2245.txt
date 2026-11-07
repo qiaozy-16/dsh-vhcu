@@ -1,0 +1,188 @@
+DSH-VHCU  P8-01  UI 软壳重构（Vision / Action / Hear + ⚙ 设置）交付报告
+生成时间：2026-10-31 22:45 (Asia/Shanghai)
+阶段：P8（单 Tab 内部三栏控制台；数据契约与设置）
+约束：侧边栏空间有限，**没有注册任何新的独立 Tab**
+
+====================================================================
+0. 结论（先看这 7 条）
+====================================================================
+C1. 侧边栏仍然只有一个 Tab（id 不变 vhcu:monitor），标题由「VHCU 视觉」改为 **VHCU**；
+    面板内部重构为三个数据 Tab：[V] Vision、[A] Action、[H] Hear。
+C2. 数据面严格分流：SSE 的 `event:` 帧只允许 kind=vision|action|hear；
+    internal status/error/daemon 只进内存环，不再作为数据事件推送；hello/补发也按三种 kind 过滤。
+C3. 每条数据都有毫秒级 ts（Date.now()）。Vision 事件含 roiCount/diffMs/screen/rois[].frame_url；
+    Action 事件含 action/ok/durationMs/params/error。
+C4. Vision Tab：时间戳、ROI 数、diffMs、屏幕尺寸、坐标、每个 ROI 的签名缩略图（≤3 张）。
+    Action Tab：时间戳、动作名、参数摘要、耗时 ms、成功/失败。
+    Hear Tab：预留说明，当前只接受 kind=hear 契约。
+C5. 右上角 ⚙ 悬浮层：调试模式（显示原始 JSON）、输入法切换（Ctrl+Space / Shift / 不切换）、
+    宏管理（打开记事本 / 保存文件）；保存走 POST /vhcu/settings，并传给 Python 的 input.type/宏。
+C6. 新增 /vhcu/settings GET/POST；settings 随 snapshot/status 下发；宏被禁用时工具返回 E_DENIED。
+C7. 测试：Node 32/32、Python 39/39。新增：SSE kind/ts 断言、action 事件字段断言、
+    5 条路由、设置 GET/POST、客户端三 Tab/⚙/标题 VHCU 静态结构。
+
+====================================================================
+1. 前端结构（lib/client.js）
+====================================================================
+1.1 单 Tab 注册
+  sidebar.registerTab({
+    id: 'vhcu:monitor',
+    title: 'VHCU',                    ← 原「VHCU 视觉」
+    description: '视觉/动作/听觉三栏监控、设置与实时事件流',
+    order: 120, single: true,
+    component: () => h(Panel),
+  })
+  仍然只有这一次 registerTab 调用；没有任何新 Tab。
+
+1.2 面板布局
+  header：状态灯 + VHCU + phase + 开启/关闭视觉 + ⚙
+  meta：源 / pid / 帧 / 变化 / fps
+  tabs：[V] Vision  count、[A] Action count、[H] Hear count
+  list：按 activeTab 过滤 kind 后渲染
+  footer：SSE 状态 + 上次错误/按需唤醒
+  gear：透明 backdrop + 悬浮 panel（调试、IME、宏管理、保存/关闭）
+
+1.3 Vision 行
+  时间戳 · 「检测到画面变化 · N 个区域 · X ms」
+  子行：ROI N · diffMs · 屏幕 · 坐标列表
+  缩略图：rois[].frame_url → <img class=vhcu-thumb>，最多 3 张（10 分钟签名有效期）
+
+1.4 Action 行
+  时间戳 · 动作名 · 成功/失败 · durationMs
+  子行：params 摘要（x/y、keys、amount、text、from/to）+ error
+  debug 开启时追加原始 JSON。
+
+1.5 Hear
+  无数据时显示「Hear（预留）…」；有 kind=hear 事件时按通用行渲染。
+
+====================================================================
+2. 后端数据契约（lib/index.js）
+====================================================================
+2.1 kind 白名单
+  const DATA_KINDS = new Set(['vision','action','hear']);
+  note(kind,...)：
+    - 所有记录都进 ring（供诊断）；
+    - 只有 DATA_KINDS 命中时才写 `event: event` 帧；
+    - status/error/daemon 记录不进入 SSE 数据面。
+  /vhcu/state 的 events、SSE hello、Last-Event-ID 补发全部按 DATA_KINDS 过滤。
+
+2.2 Vision 事件
+  { id, ts:Date.now(), kind:'vision',
+    text, roiCount, diffMs, screen:{width,height},
+    rois:[{id,x,y,w,h,score,frame_url}] }
+  frame_url 在广播时用现有 frameUrl() 生成（HMAC，TTL 10 分钟），前端可直接 <img>。
+
+2.3 Action 事件
+  recordAction(action,{detail,durationMs,ok,extra,error}) →
+  { id, ts, kind:'action', action, ok, durationMs, params, text, error? }
+  接入点：
+    runInputAction(op,args,{action,detail,extra})：发送成功后/失败后各记一次；
+      click / type_text / key_press / scroll / drag / macro_open_notepad / macro_save。
+    captureFullFrame({__record:true})：full_frame 成功/失败记录。
+  示例 text：`click · (812,410) · 12ms · ok`。
+  drag 的 params 额外有 from/to（便于 UI 显示）。
+
+2.4 设置
+  let settings = { debug:false, imeShortcut:'ctrl+space',
+                   macros:{open_notepad:true, save:true} };
+  mergeSettings() 只接受白名单字段/取值；GET/POST /vhcu/settings；
+  snapshot.settings 随 state/status/hello 下发；
+  settings.imeShortcut 随 input.type/宏 args 传到 Python（type_text/macro 的 imeShortcut）；
+  settings.macros.* 关闭时 Node 宏工具返回 E_DENIED（UI 可重新启用）。
+
+2.5 Python IME 配置
+  input.type_text(text, ime_shortcut='ctrl+space')
+  macro_open_notepad_and_type(text, ime_shortcut='ctrl+space')
+  _ensure_ascii_input(shortcut)：
+    ctrl+space（默认）/ shift / none 三种；仍保留「复查一次」逻辑。
+  cli.py 从 args.imeShortcut 读取并校验。
+
+====================================================================
+3. 接口
+====================================================================
+GET  /vhcu/state      → { ok, state, events }（events 仅三种 kind）
+GET  /vhcu/events     → SSE：hello/status/event/心跳；event 仅三种 kind
+POST /vhcu/control    → 启停/状态（不变）
+GET  /vhcu/frame      → 签名 PNG（不变）
+GET  /vhcu/settings   → { ok, settings }
+POST /vhcu/settings   → JSON + x-vhcu:1；{settings:{debug,imeShortcut,macros}}
+                        非法字段忽略/400；同源校验
+
+====================================================================
+4. 测试与验证
+====================================================================
+4.1 Node 32/32（contract 10 / supervisor 9 / integration 2 / plugin 8 / client 3）
+  新增/更新：
+    - 5 条路由（含 /vhcu/settings）；
+    - settings GET 默认值、POST 合并（debug/imeShortcut/macros.save）、再次 GET 生效；
+    - SSE 数据帧 kind ∈ {vision,action,hear} 且 ts 为 number；
+    - action 事件：scroll/drag 都有 action/ok/durationMs/params，drag from/to 正确；
+    - 客户端：Tab 标题 VHCU；静态树含 VHCU/Vision/Action/Hear/⚙/开启视觉/SSE。
+4.2 Python 39/39（IME 参数化后原有用例保持通过）
+4.3 dev harness 烟测：
+    registered 11 tools；routes 5；GET /vhcu/settings 默认值；
+    POST {debug:true,imeShortcut:'shift'} 返回并生效。
+4.4 未自动化：真实 DSH 侧边栏视觉验收（需重启后人工看）。
+
+====================================================================
+5. 重启与验收
+====================================================================
+5.1 重启
+  ① 完全退出 DSH（托盘退出；确认 Electron/python.exe 无残留）；
+  ② 重新打开 DSH；侧边栏打开「VHCU」；
+  ③ 日志：
+      dsh-vhcu: mounted (routes /vhcu/state|events|control|frame|settings)
+      dsh-vhcu: registered 11 tools
+5.2 验收步骤
+  1) 面板标题应为 VHCU，右上角有 ⚙；
+  2) 三个标签 V Vision / A Action / H Hear 可切换，计数独立；
+  3) 开启视觉 → Vision 出现事件与 ROI 缩略图；
+  4) 让模型执行 click/宏 → Action 出现时间、动作、耗时、成功；
+  5) Hear 显示预留说明；
+  6) ⚙ 打开设置：改调试/输入法/宏开关 → 保存 → 重开设置确认保持；
+     关掉某个宏后让模型调用该宏应返回 E_DENIED。
+5.3 若 UI 没变化
+  - 确认完全重启（client bundle 只在启动时加载）；
+  - 日志若仍是旧 routes 文本，说明宿主加载的是旧 lib（检查 junction）；
+  - 仍显示「VHCU 视觉」= client 未更新。
+
+====================================================================
+6. 文件改动
+====================================================================
+【新增】
+  VHCU-P8-01-UI三栏重构-20261031-2245.txt（本报告）
+【修改】（覆盖前已改名 .bak）
+  lib/client.js            三 Tab + ⚙ 设置 + VHCU 标题 + 缩略图/Action 行
+  lib/index.js             数据 kind 白名单；action 事件；settings 状态与路由；
+                           IME/宏设置下发；SSE hello/补发过滤；action 参数
+  vision/vhcu_daemon/input.py  ime_shortcut 参数（ctrl+space/shift/none）
+  vision/vhcu_daemon/cli.py    读取 args.imeShortcut 并传给 type/macro
+  host/test/plugin.test.mjs    5 路由、settings、SSE kind/ts、action 字段
+  host/test/client.test.mjs    标题 VHCU、三 Tab、⚙ 断言
+  package.json / dsh.plugin.json  0.8.0
+  README.md                    P8 面板、数据契约、设置、验收
+【未改】
+  runner.py、httpframe.py、contract（无新 op）、install.mjs
+
+备份：lib/index.js.bak、lib/client.js.bak、input.py.bak、cli.py.bak、
+      plugin.test.mjs.bak、client.test.mjs.bak、package.json.bak、
+      dsh.plugin.json.bak、README.md.bak。
+
+====================================================================
+7. 已知边界与下一步
+====================================================================
+R1. 设置保存在插件进程内，重启 DSH 恢复默认；后续可落盘到 profile。
+R2. 缩略图 URL 10 分钟过期；历史行过期后图片会空白（数据仍在）。
+R3. 时间轴/滑块未实现，但 ms ts + kind + action/vision 字段已构成契约。
+R4. Action 只记录工具动作；系统级/外部键鼠不在此列。
+R5. Hear 仅占位；音频管线（VAD/whisper）尚未接入。
+R6. 仍只支持主屏。
+
+P9 建议：
+  N1. 时间轴视图（按 ts 聚合 vision/action 泳道 + 滑块）；
+  N2. Hear 接 VAD/faster-whisper，复用 kind=hear；
+  N3. 设置落盘 + 每会话覆盖；
+  N4. 缩略图缓存/延长签名 TTL；
+  N5. 多屏/混合 DPI。
+
+（报告完）

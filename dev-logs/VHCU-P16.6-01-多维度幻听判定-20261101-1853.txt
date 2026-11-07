@@ -1,0 +1,176 @@
+DSH-VHCU  P16.6-01  多维度幻听判定
+生成时间：2026-11-01 18:53 (Asia/Shanghai)
+阶段：P16.6（绝对黑名单 + 能量/概率/长度综合判定）
+前置：P16.4 复读机过滤、融合峰值完成
+
+====================================================================
+0. 结论（先看这 7 条）
+====================================================================
+C1. 新增 classify_transcript()，返回 {discard, reason, score}。
+C2. 绝对黑名单（Hello / Thank you for watching 等）无论长短直接丢弃。
+C3. 高能量长句：has_spike 或 rms_max>0.3，且文本 >8 字 → 丢弃文本，
+    只发 hear.audio，并强制 has_spike=true（💥 巨响）。
+C4. 高概率无语音长句：no_speech_prob>0.6 且文本 >10 字 → 丢弃。
+C5. 保护短句：no_speech_prob>0.6、1-5 字、RMS 0.03-0.2、无尖峰 → 保留。
+C6. 旧短词规则降为最后一级；短句保护优先于它。
+C7. 测试：Node 61/61、Python 85/85。
+
+====================================================================
+1. 判定顺序（先命中先返回）
+====================================================================
+  1) 空文本 / 纯标点 / 纯 annotation 标签
+       → discard, reason=empty, score=100
+  2) 绝对黑名单（plain 子串匹配，大小写/弯引号归一）
+       → discard, reason=blacklist, score=100
+  3) 复读机（单词/短语重复 >=3）
+       → discard, reason=repetitive, score=90
+  4) 高能量长句：
+       (has_spike 或 rms_max>0.3) 且 len(text)>8
+       → discard, reason=high-energy, score=80
+  5) 高概率无语音长句：
+       no_speech_prob>0.6 且 len(text)>10
+       → discard, reason=long-no-speech, score=70
+  6) 保护真实短句：
+       no_speech_prob>0.6
+       且 1 <= len(text) <= 5
+       且 0.03 <= RMS <= 0.2
+       且 not has_spike
+       且 (rms_max 未提供或 <=0.3)
+       → KEEP, reason=protected-short, score=-50
+  7) 旧短词规则（最后）：
+       key ∈ 短词集合
+       且 duration<3.0s
+       且 (no_speech_prob>0.6 或 RMS<0.05)
+       → discard, reason=short-phrase, score=40
+  8) 其他 → KEEP, reason=keep, score=0
+
+  说明：
+    - score 用于日志/测试可观测，实际决策按上述显式规则；
+    - 绝对黑名单在保护短句之前，所以 "Hello" 即使 5 字也丢弃；
+    - 高能量长句有最高保护优先级，避免炮声脑补长文；
+    - 短句保护在旧短词规则之前，小声 "You" 不再被误杀。
+
+====================================================================
+2. Absolute blacklist
+====================================================================
+ABSOLUTE_BLACKLIST:
+  "i'm not going to be able to do that"
+  "i am not going to be able to do that"
+  "thank you for watching"
+  "thanks for watching"
+  "hello"
+
+- plain 归一化：去标签、casefold、弯引号→直引号、压缩空白；
+- 子串命中即丢弃（"Hello world" 也会命中）。
+- 这是用户明确要求的“无论多长直接丢弃”。
+
+====================================================================
+3. 高能量长句（防爆炸脑补）
+====================================================================
+  条件：
+    (has_spike 或 rms_max > 0.3) 且 len(text) > 8
+  动作：
+    - 不 emit hear.text；
+    - emit_ambient(reason="high-energy", force=True, force_spike=True)
+    - 即使平均 RMS < AMBIENT_RMS_THRESHOLD 也强制发；
+    - has_spike=true → UI/融合显示 💥 巨响/音效。
+  日志：
+    [hear] discarded hallucination: '...' (reason=high-energy, score=80)
+
+====================================================================
+4. 高概率无语音长句（防 BGM 幻觉）
+====================================================================
+  条件：
+    no_speech_prob > 0.6 且 len(text) > 10
+  动作：
+    - 丢弃文本；
+    - 若 RMS>=0.03 仍发普通 hear.audio（不强制 spike）。
+  示例：
+    "I'm not going to be able to do that" 属于黑名单，更早命中。
+
+====================================================================
+5. 保护真实短句
+====================================================================
+  条件：
+    no_speech_prob > 0.6
+    1 <= 字符数 <= 5
+    RMS 在 0.03 ~ 0.2
+    has_spike=false 且 rms_max<=0.3
+  结果：
+    - 保留 hear.text，不进入短词过滤；
+    - 适用于小声说 "You"/"你好"/"打开" 等。
+  注意：
+    如 "You" 被黑名单/绝对规则命中仍会先丢弃；
+    "You" 不在 ABSOLUTE_BLACKLIST，因此受保护。
+
+====================================================================
+6. 测试
+====================================================================
+Node 61/61（无逻辑改动；既有融合/契约/UI 测试保持）
+Python 85/85
+  MultiSignalClassifierTest:
+    - classify_transcript("Hello").reason == blacklist
+    - "Thanks for watching" == blacklist
+    - "When the fire burns out "×4 == repetitive
+    - 长句 + has_spike/rms_max=0.5 == high-energy
+    - 长句 + no_speech=0.9 == long-no-speech
+    - "You" + no_speech=0.9 + rms=0.1 + max=0.15 == protected-short（keep）
+    - high-energy 长句 flush：不 emit hear.text；1 条 hear.audio
+      reason=high-energy、has_spike=true
+  ShortFragment:
+    - 短词 + 低 RMS（0.01）仍丢弃；
+    - 短句保护覆盖旧短词；
+    - 3.5s "You" 保留；
+  P16.3/P16.4 既有测试保持。
+
+====================================================================
+7. 重启验证
+====================================================================
+7.1 完全退出 DSH（无 python.exe/Electron 残留）→ 重开。
+7.2 黑名单
+  - 播放含 "Thank you for watching" / "Hello" 的视频；
+  - 不应出现这些转写；
+  - 若音频有能量，仍可有 🎵 环境音（不强制）。
+7.3 爆炸幻觉
+  - 播放炮声/爆炸视频；
+  - 不应出现长段脑补文字；
+  - [H] 应出现 🎵 ... 💥 巨响/音效；
+  - [M] 融合行（若同窗口有视觉）显示 [RMS:... | 峰值:... 💥]。
+7.4 BGM 长句
+  - 播放纯音乐，若 no_speech>0.6 且文本 >10 字，应被丢弃。
+7.5 小声短句
+  - 对系统播放/麦克风小声说 "You" 或 "你好"（RMS 约 0.05-0.15）；
+  - 即使 no_speech>0.6，也应保留为 hear.text；
+  - 若 RMS<0.03，仍可能被短词规则丢弃。
+7.6 日志
+  [hear] discarded hallucination: '...' (reason=..., score=...)
+  可确认命中层级。
+
+====================================================================
+8. 文件改动
+====================================================================
+【新增】
+  VHCU-P16.6-01-多维度幻听判定-20261101-1853.txt（本报告）
+【修改】
+  vision/vhcu_daemon/hear.py   classify_transcript、黑名单、四层判定、
+                               emit_ambient force/force_spike
+  vision/tests/test_hear.py    MultiSignal 测试、短句保护/黑名单更新
+  package.json / dsh.plugin.json 0.26.0
+  README.md                    P16.6 说明
+【备份】
+  hear.py.bak、test_hear.py.bak、package.json.bak、
+  dsh.plugin.json.bak、README.md.bak
+
+====================================================================
+9. 已知边界
+====================================================================
+R1. "Hello" 绝对黑名单会误杀真实问候；按需求直接丢弃。
+R2. 高能量长句对任何 >8 字文本都丢弃，可能误伤大声正常说话；
+    但这是防炮声脑补的明确取舍。
+R3. 短句保护只覆盖 1-5 字、RMS 0.03-0.2、无尖峰；
+    6-10 字高 no_speech 文本仍可能保留（未命中长句规则）。
+R4. 长度按原始 strip 字符数计算，包含空格/标点。
+R5. score 仅用于日志，不参与阈值决策。
+R6. 真实黑名单/爆炸/小声短句需重启后人工验证。
+
+（报告完）

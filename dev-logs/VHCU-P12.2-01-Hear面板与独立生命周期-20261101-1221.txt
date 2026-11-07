@@ -1,0 +1,175 @@
+DSH-VHCU  P12.2-01  Hear UI 补全与生命周期独立
+生成时间：2026-11-01 12:21 (Asia/Shanghai)
+阶段：P12.2（Hear 面板按钮/状态灯/loading；Hear 不再依赖 Vision）
+前置：P12.1 Hear 骨架完成
+
+====================================================================
+0. 结论（先看这 6 条）
+====================================================================
+C1. [H] Hear 面板顶部新增控制条：状态点 + 「开启听觉 / 关闭听觉」按钮；
+    loading 时显示「模型加载中…」与「取消加载」，不会让用户误以为卡死。
+C2. [H] Tab 标签也带状态点：灰 idle / 黄 loading|starting / 绿 listening / 红 error。
+C3. 按钮直接 POST /vhcu/control {action:"hear.start"|"hear.stop"}；
+    control 新增 hear.start / hear.stop / hear.status。
+C4. 生命周期解耦：视觉未开时 start_hear 会自动拉起 Python 守护进程，
+    只启动 Hear 线程，不执行 vision.start、不截屏。
+C5. 状态新增 daemonRunning；Hear-only 时 phase 仍为 idle（视觉确实没开）。
+    关闭 Hear 若视觉没开，会一并退出守护进程；视觉开着则只停音频、保留守护进程。
+C6. 测试：Node 45/45、Python 52/52。
+    ⚠️ 真实音频/模型下载仍未本机验证（依赖未安装，如实记录）。
+
+====================================================================
+1. UI（lib/client.js）
+====================================================================
+1.1 Hear 控制条（tab==='hear' 时渲染在列表顶部）
+  [● 状态]  [文字：未启动/模型加载中…/正在监听系统声音/错误：...]  [按钮]
+  - 状态点颜色：
+      idle/stopped  #5f6c80 灰
+      starting/loading  #f0c674 黄
+      listening     #4ade80 绿
+      error         #f28b82 红
+  - 按钮：
+      idle/error          → 「开启听觉」→ control hear.start
+      loading/starting    → 「取消加载」→ control hear.stop
+      listening           → 「关闭听觉」→ control hear.stop
+  - 提示行：
+      loading/starting → “首次运行会下载 base 模型到插件目录 models/，请稍候”
+      其他 → 模型目录（若已知）或“Hear 独立于视觉，可单独开启系统内录”
+1.2 [H] Tab 状态点
+  在 tab 的 “Hear” 与计数之间加小圆点，颜色同上；无需进入面板即可看到 loading/绿色。
+1.3 空态
+  “点击上方「开启听觉」开始监听电脑正在播放的声音”。
+1.4 错误
+  control 失败时同时用 payload.state 更新界面（显示红色 error），
+  顶部 error note 显示 hint（如 pip 安装命令）。
+
+====================================================================
+2. 控制与生命周期（lib/index.js）
+====================================================================
+2.1 control 新 action
+  hear.start：
+    enqueue(doStartHear)
+    → ensureDaemonReady()：如果 supervisor 不存在/未 ready，则启动 Python
+      守护进程（只 ready，不发送 vision.start）；
+    → supervisor.send("hear.start")；
+    → state.hear 更新，pushStatus。
+  hear.stop：
+    enqueue(doStopHear)
+    → 若守护进程 ready，send("hear.stop")；
+    → state.hear=idle；
+    → 若 state.phase !== "running"（视觉没开）：supervisor.stop("hear-stop")，
+      daemonRunning=false，pid/port 清空；
+    → pushStatus。
+  hear.status：
+    守护进程未运行 → 返回当前 state.hear；
+    否则 send("hear.status") 返回并附在 snapshot。
+2.2 状态
+  state.daemonRunning: boolean（Python 守护进程是否存活）
+  state.hear: {state,running,model,device,computeType,modelPath,segments,lastError}
+  - doStart（视觉）置 daemonRunning=true；
+  - doStop（视觉）置 false、hear idle；
+  - supervisor failure → daemonRunning=false、hear state=error。
+2.3 失败清理
+  hear.start 失败（如 E_UNAVAILABLE）且视觉没开时：
+    停止刚拉起的守护进程，避免留下空转 Python；state.hear=error，UI 可重试。
+2.4 工具描述/行为
+  vhcu_start_hear：不再要求 start_vision；描述明确“自动唤醒守护进程、
+    只启动 Hear 线程、不截屏”。
+  vhcu_stop_hear：若视觉没开，停止后守护进程退出；视觉开着则保留。
+  工具仍通过 control 串行化，避免与视觉启停竞争。
+
+====================================================================
+3. 测试
+====================================================================
+Node 45/45（新增/更新）
+  - 客户端：Hear tab 渲染 vhcu-hear-bar、「开启听觉」、系统内录空态、tab 状态点；
+  - 服务端：/vhcu/control 接受 hear.stop（视觉/守护进程均关闭时 200，
+    state.hear.state=idle，daemonRunning=false）；
+  - 工具描述：含 WASAPI Loopback / VHCU_MODEL_PATH / E_UNAVAILABLE /
+    “独立于视觉”，且不再要求先 start_vision；
+  - Hear 三工具注册、空事件列表/render、stop 幂等。
+Python 52/52（沿用 P12.1；未改音频代码）
+未验证（如实记录）：
+  - 未安装 soundcard/webrtcvad/faster-whisper，真实 loopback、VAD、
+    模型下载/转写、取消 loading 的线程退出时机均未实跑；
+  - 需安装依赖后按第 5 节人工验收。
+
+====================================================================
+4. 接口变化
+====================================================================
+  POST /vhcu/control
+    {action:"hear.start"} → {ok:true,state:{...,hear,daemonRunning}}
+    {action:"hear.stop"}  → 同上，hear.state=idle
+    {action:"hear.status"}→ snapshot + hear
+  GET /vhcu/state：新增 state.daemonRunning；state.hear 原有。
+  SSE：hear.status 只用于状态点；hear.text 仍为数据事件。
+  UI 按钮不直接调工具，统一走 /vhcu/control（符合 P12.2 要求）。
+
+====================================================================
+5. 重启验证
+====================================================================
+5.1 安装依赖（若未装）
+  py -3 -m pip install soundcard webrtcvad-wheels faster-whisper
+5.2 重启
+  完全退出 DSH（确认 Electron/python.exe 无残留）→ 重开 → 新会话。
+  日志：
+    dsh-vhcu: mounted (routes /vhcu/state|events|control|frame|settings|macros)
+    dsh-vhcu: registered 16 tools
+5.3 纯 Hear 验证（不要先开视觉）
+  1) 打开侧边栏 VHCU → [H] Hear；
+  2) 应看到控制条、灰色状态点、「开启听觉」；
+  3) 点击「开启听觉」：
+     - 状态点变黄，文案「模型加载中…」；
+     - 首次下载 base 到 dsh-vhcu\models（约 150MB）；
+     - 完成后变绿，「正在监听系统声音」；
+  4) 播放系统外放音频 → 列表出现转写行 / vhcu_get_hear_events 有文本；
+  5) 点击「关闭听觉」→ 灰点；任务管理器确认 Python 进程退出（因为视觉没开）。
+5.4 视觉 + Hear
+  1) 先「开启视觉」；
+  2) Hear 开启/关闭只影响音频，视觉守护进程保留。
+5.5 缺依赖
+  未安装依赖时点按钮：应显示 E_UNAVAILABLE + pip hint，状态点变红，不卡死。
+5.6 取消加载
+  在模型下载中点击「取消加载」：按钮触发 hear.stop，UI 回 idle；
+  实际线程可能因下载阻塞需数秒退出（已知边界）。
+
+====================================================================
+6. 文件改动
+====================================================================
+【新增】
+  VHCU-P12.2-01-Hear面板与独立生命周期-20261101-1221.txt（本报告）
+【修改】（覆盖前已改名 .bak）
+  lib/index.js        control hear.start/hear.stop/hear.status；
+                     ensureDaemonReady/doStartHear/doStopHear；
+                     daemonRunning；工具改走 control；描述更新
+  lib/client.js       Hear 控制条/按钮/状态点/loading 文案；tab 状态点；
+                     Panel initialTab（测试用）
+  host/test/plugin.test.mjs  Hear 描述/控制 hear.stop/16 工具更新
+  host/test/client.test.mjs  Hear UI 渲染测试
+  package.json / dsh.plugin.json  0.16.0
+  README.md           P12.2 UI/独立生命周期/验收
+【未改】
+  vision/vhcu_daemon/hear.py（P12.1 音频实现不变）、cli.py（hear ops 已有）、
+  contract、宏库、视觉/坐标逻辑
+
+备份：lib/index.js.bak、lib/client.js.bak、plugin.test.mjs.bak、
+      client.test.mjs.bak、package.json.bak、dsh.plugin.json.bak、README.md.bak。
+
+====================================================================
+7. 已知边界与下一步
+====================================================================
+R1. Hear 仅 Windows WASAPI Loopback；模型 base/cpu/int8。
+R2. 只开 Hear 时 phase 仍为 idle（视觉确实关闭），daemonRunning=true；
+    这是故意区分“视觉状态”和“守护进程状态”。
+R3. 模型下载期间取消加载可能需等下载 IO 退出（join 8s 超时后 UI 已回 idle）。
+R4. 真实音频/模型下载未本机验证（依赖未安装）。
+R5. 停止视觉仍会杀掉守护进程并停止 Hear（视觉与 Hear 共享进程）。
+R6. 状态点是轮询/SSE 状态更新，非动画 loading 条。
+
+P12.3 建议：
+  N1. loading 进度/下载大小可视化；
+  N2. Hear 设备选择与音量电平；
+  N3. 转写语言/热词配置；
+  N4. 视觉与 Hear 时间轴合并展示。
+
+（报告完）

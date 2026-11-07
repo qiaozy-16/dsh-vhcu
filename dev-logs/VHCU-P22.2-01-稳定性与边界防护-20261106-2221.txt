@@ -1,0 +1,217 @@
+DSH-VHCU  P22.2-01  稳定性与边界防护补丁
+生成时间：2026-11-06 22:21 (Asia/Shanghai)
+阶段：P22.2（V1.0 上线前稳定性重构）
+范围：隐私黑屏/暂停、焦点拦截、帧时序、Hear 重连、原始转写、内存熔断、30 步上限、视觉确认规范。
+
+====================================================================
+1. 时间 / 阶段 / 范围
+====================================================================
+  时间：2026-11-06 22:21 +08:00
+  阶段：P22.2
+  目标：
+    1. 敏感窗口黑屏 + 原地罚站 + 无保护截屏高危开关；
+    2. 前台焦点变化物理拦截（E_FOCUS_LOST）；
+    3. frame_timestamp 过期拒绝（E_STALE_FRAME）；
+    4. Hear 音频设备断开自动重连；
+    5. 原始转写调试开关；
+    6. Node 1.5GB 内存熔断 + 宏 30 步上限；
+    7. 视觉/动作 Description 要求拿不准先 vhcu_get_full_frame。
+  范围：
+    - Node：lib/index.js、lib/client.js、host/lib/*；
+    - Python：privacy/runner/input/hear/cli；
+    - 测试：Node 89、Python 95；
+    - 版本：0.41.0。
+
+====================================================================
+2. 本轮交付物
+====================================================================
+2.1 任务一：隐私黑屏与原地罚站
+    Python runner.capture_now(allow_unprotected=False)：
+      - 敏感窗口且未开高危：不抓取任何敏感像素；
+      - 生成全屏黑 Frame（BGRA 全 0）；
+      - 返回 privacyBlocked=true / masked=true / warning；
+      - 绝不关闭、最小化、移动窗口，也不发送任何快捷键。
+    Node captureFullFrame：
+      - 敏感时返回 ok:true + 黑色 frame_url + warning：
+        [系统提示：当前处于敏感隐私窗口。画面已打码，请立刻停止所有动作，
+         原地等待用户自行切走该窗口。]
+      - 同步 state.privacy.blocked=true；
+      - masked 帧不会成为 click 坐标基线。
+    Python 输入层：
+      - state.privacy.blocked 时 Node 直接拒绝所有键鼠注入（E_STATE），
+        AI 原地暂停。
+    UI：
+      - 常驻红黄横幅：
+        🔒 隐私保护触发：AI 已暂停，请处理完毕后切换窗口
+      - ⚙ 新增「允许无保护截屏（高危）」；
+      - 勾选后出现二次确认（确认开启/Cancel），
+        确认后仍需点「保存设置」才生效；
+      - 高危仅放行截图，键鼠动作仍被隐私拦截。
+2.2 任务二：焦点被抢占防护
+    Python privacy.foreground_identity()：
+      - 只读 GetForegroundWindow / GetWindowThreadProcessId / GetWindowText；
+      - 返回 {hwnd,pid,title}。
+    Runner：
+      - vision.diff / vision.capture 附带 foreground 身份；
+    Node：
+      - 保存 lastForeground；
+      - runInputAction 自动传入 expectedForeground；
+    InputController.assert_foreground：
+      - 注入前比较当前 hwnd；
+      - 不同 → InputError E_FOCUS_LOST；
+      - hint：
+        ⚠️ 检测到前台窗口焦点已被用户改变，本次操作已被拦截。
+        请重新调用 vhcu_get_full_frame 确认当前屏幕状态后再重试。
+    CLI `_input()` 在 click/type/hotkey/scroll/drag/macro 前统一校验。
+2.3 任务三：视觉时序校验
+    `vhcu_mouse_click` 新增可选参数：
+      frame_timestamp（epoch ms）
+    vhcu_get_full_frame 返回 frame_timestamp。
+    点击前：
+      - 非法 → E_PROTO；
+      - 距现在 >1000ms → E_STALE_FRAME；
+      - hint 要求重新调用 vhcu_get_full_frame 取新图和新的时间戳。
+    纯函数：host/lib/guards.js `isStaleFrame()`。
+2.4 任务四：音频设备掉线重连
+    hear.py `_capture_loop`：
+      - recorder.record / 打开设备抛异常时不再让线程崩溃；
+      - `_set("reconnecting")` + hear.status：
+        message="音频设备断开，尝试重连中"；
+      - 关闭旧 recorder，等待 1s，重新 `_open_loopback` + `mic.recorder`；
+      - 成功后 status listening，message="音频设备已重新连接"；
+      - 重连时清空当前语音缓冲，避免拼接旧音频。
+    UI：
+      - Hear 状态支持 reconnecting；
+      - 文案：音频设备断开，重连中…
+2.5 任务五：过滤调试开关
+    ⚙ 新增「关闭幻觉过滤（输出原始转写）」；
+    settings.hearRawTranscripts → Node hear.configure
+      {level, disableFilter}；
+    HearService.configure(level, disable_filter)；
+    disableFilter=true 时跳过 classify_transcript，直接输出原始转写；
+    status 返回 disableFilter。
+2.6 任务六：资源防爆与宏限制
+    内存：
+      - host/lib/guards.js MEMORY_LIMIT_BYTES=1.5GB、MEMORY_CHECK_MS=5s；
+      - Node 定时读取 process.memoryUsage().rss；
+      - 超过水位且视觉运行 → note 警告、doStop 熔断视觉、
+        state.phase=error、lastError.code=E_MEMORY；
+      - UI 红色内存警告横幅。
+    宏：
+      - MAX_STEPS 50 → 30；
+      - MacroRecorder 默认 30；
+      - 前端导入校验 >30 拒绝；
+      - 录制进度实时显示 N/30；
+      - 达到 30 步：Action 日志警告 + 录制条警告；
+      - 停止保存表单摘要标记“已达到 30 步上限”；
+      - 旧 macros.json 中 31..50 步宏：加载时保留前 30 步并持久化，
+        不再当损坏文件重置。
+2.7 任务七：操作前视觉确认规范
+    新增 VHCU_VISUAL_CONFIRM_RULE：
+      如果对当前画面拿不准，在调用宏或连续点击前，
+      必须先重新调用 vhcu_get_full_frame 确认画面；
+      点击/按键后也要用 vhcu_get_vision_events 或 vhcu_get_full_frame 回读，
+      确认无误再继续。
+    应用于视觉/动作工具（start_vision、get_full_frame、get_vision_events、
+    click/drag/scroll/key/type、run_macro、save_macro 等）。
+2.8 暂不开发项
+    “AI 正在操作电脑”系统级告知 UI：
+      不在本轮实现；记录为 V1.1 与 dsh-island 灵动岛融合时，
+      通过灵动岛专属状态灯实现。
+
+====================================================================
+3. 证据
+====================================================================
+3.1 实读源码
+    Python：
+      privacy.py foreground_identity；
+      runner.py capture_now 黑帧/foreground；
+      input.py assert_foreground；
+      hear.py 重连/原始过滤/configure；
+      cli.py expectedForeground + allowUnprotected。
+    Node：
+      guards.js FRAME_MAX_AGE_MS/MEMORY_LIMIT_BYTES/isStaleFrame/
+        memoryLimitExceeded；
+      index.js privacy block、lastForeground、frame_timestamp、
+        memory guard、30 步提示；
+      client.js 隐私横幅/高危开关/原始转写/重连/30 步。
+3.2 实测
+    Node 89/89 通过；
+    Python 95/95 通过。
+    新增/覆盖：
+      - guards：isStaleFrame 1000ms 边界、memoryLimitExceeded 边界；
+      - plugin：frame_timestamp 新鲜/过期/非法；frame_timestamp 返回存在；
+      - client：隐私横幅、无保护截屏二次确认、原始转写、reconnecting、
+        30 步文案；
+      - macros：MAX_STEPS=30、31 步拒绝、旧 31 步宏迁移为 30 不损坏；
+      - recorder：默认 maxSteps=30；
+      - Python privacy：敏感截图返回全黑、unprotected 标记；
+      - input：焦点变化 E_FOCUS_LOST、同焦点放行；
+      - hear：disableFilter 状态、黑名单文本在原始模式输出、设备异常后
+        reconnecting → 重连 listening；
+      - descriptions：视觉确认规则存在。
+3.3 未实测
+    - 真实敏感窗口全屏黑图在 DSH 面板中的视觉效果；
+    - 真实切换前台窗口触发 E_FOCUS_LOST 的端到端；
+    - 真实拔出耳机后的 Hear 重连（用 fake recorder 单测）；
+    - 1.5GB RSS 实际触发（只测纯函数边界）；
+    - 旧 macros.json 真实文件迁移（用临时 JSON 测）；
+    - “AI 正在操作电脑”系统级 UI（本轮不开发）。
+
+====================================================================
+4. 风险与未验证项
+====================================================================
+R1. 隐私黑图警告文本在工具返回中，未把文字画进 PNG；
+    图片本身为纯黑，模型需读取 message/warning。
+R2. 焦点校验基于最近一次视觉帧的 foreground；
+    宏内部主动切换窗口（如 Win+R）不会被逐步拦截，只在动作入口校验。
+R3. frame_timestamp 只校验时间年龄，不校验它是否属于最后一帧；
+    模型应使用 vhcu_get_full_frame 返回的新时间戳。
+R4. 无保护截屏只放行截图；键鼠仍会被隐私暂停拦截。
+R5. Hear 重连单测使用 fake recorder；真实 soundcard 设备异常行为未验证。
+R6. 1.5GB 是 Node 宿主 RSS，不是 Python 进程内存；可能较早/较晚触发。
+R7. 30 步上限会截断旧宏；迁移只保留前 30 步，不提供恢复。
+R8. 旧宏迁移会写回文件；写入失败会落入既有损坏保护路径。
+R9. 视觉确认规则是 Description 引导，不是运行时强制。
+R10. 本轮未实现系统级“AI 正在操作电脑”告知 UI。
+
+====================================================================
+5. 待确认决策（编号）
+====================================================================
+D1. 隐私模式返回黑图 + 工具警告，不关闭/最小化用户窗口。
+D2. 无保护截屏需二次确认，且只放行截图，不放行动作。
+D3. 焦点拦截以最近一次视觉帧 foreground 为基准。
+D4. frame_timestamp 超过 1000ms 直接 E_STALE_FRAME。
+D5. Hear 设备断开自动重连，UI 显示 reconnecting。
+D6. 原始转写开关只用于排查，默认关闭。
+D7. 内存水位 1.5GB、宏上限 30 步、旧宏截断迁移。
+D8. 视觉确认规则写进工具 Description，不新增强制参数。
+D9. 系统级告知 UI 延后到 V1.1 灵动岛融合。
+
+====================================================================
+6. 下一步计划
+====================================================================
+N1. 完全退出 DSH → 重开，加载 0.41.0。
+N2. 验证隐私：
+    - 打开标题含“密码/银行”的窗口；
+    - 调 vhcu_get_full_frame；
+    - 应返回纯黑图 + 警告，UI 红黄横幅；
+    - 点击/按键应被拒绝，用户窗口不得被关闭/最小化/移动。
+N3. 验证焦点：
+    - 取全屏后立即切换前台窗口，再点击；
+    - 应返回 E_FOCUS_LOST，不注入。
+N4. 验证时序：
+    - 取全屏，等待 >1s，点击时传旧 frame_timestamp；
+    - 应返回 E_STALE_FRAME。
+N5. 验证 Hear：
+    - 播放声音时拔耳机/切换默认输出；
+    - UI 应显示“音频设备断开，尝试重连中”，恢复后继续转写。
+N6. 验证设置：
+    - 打开原始转写，确认黑名单文本可输出；
+    - 关闭后恢复过滤；
+    - 无保护截屏二次确认 + 保存。
+N7. 验证资源/宏：
+    - 录制到 30 步，UI 警告；
+    - 旧 31+ 步宏加载后变 30 步且不损坏。
+
+（报告完）

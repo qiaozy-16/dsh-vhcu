@@ -1,0 +1,159 @@
+DSH-VHCU  P20-01  宏生态与容错降级
+生成时间：2026-11-01 21:36 (Asia/Shanghai)
+阶段：P20
+范围：宏删除/导入/导出 UI；宏失败视觉慢车道 hint；不改 Python 录制/执行引擎。
+
+====================================================================
+1. 时间 / 阶段 / 范围
+====================================================================
+  时间：2026-11-01 21:36 +08:00
+  阶段：P20
+  任务：
+    1. 单个自定义宏删除；
+    2. 宏导入/导出（开源生态）；
+    3. 宏失败自动降级提示。
+  修改：
+    - lib/client.js：宏详情删除/导出、宏列表导入；
+    - lib/index.js：executeStoredMacro / executeMacroQueue 失败 hint；
+    - host/lib/macros.js：MACRO_RECOVERY_HINT / withMacroRecoveryHint；
+    - 测试：macros.test / client.test；
+    - 版本 0.39.0。
+
+====================================================================
+2. 本轮交付物
+====================================================================
+2.1 删除宏
+    位置：⚙ 设置 → 宏组 → 点开单个宏 → 详情底部。
+    按钮：
+      🗑 删除此宏（红色 vhcu-danger）
+    安全：
+      - builtin === true：不渲染删除按钮；
+      - 自定义宏：第一次点击进入确认态
+        「⚠ 再点一次确认删除」，再点才调用；
+      - 可点「取消删除」退出确认；
+      - 成功后调用已有 POST /vhcu/macros {action:"delete",name}，
+        关闭详情并刷新宏列表；
+      - 失败显示 Node 返回错误，恢复按钮态。
+    说明：P19.2 之前已有删除按钮，但文案为普通「删除宏」且不显眼；
+          本次改为红色全宽按钮 + 二次确认，避免误删。
+
+2.2 导入宏
+    位置：宏组页面「+ 新建宏」旁边的 [📥 导入宏]。
+    交互：
+      - 展开文本域，粘贴单个宏 JSON 或数组；
+      - 支持：
+          {name,description,target_app,steps}
+          [{...},{...}]
+          {macros:[...]}
+          {macro:{...}}
+      - 前端校验：1..20 个、每个必须有 name、steps 非空且 ≤50 步；
+      - 导入分类：当前自定义宏组；若在「系统基础宏」组则回退
+        「我的自定义宏」；
+      - builtin 字段不会保留（服务端 add 强制 builtin=false）；
+      - 逐个调用 POST /vhcu/macros {action:"save"}；
+      - 任一失败显示“第 N 个导入失败：...”，已成功的保留；
+      - 成功后关闭导入框并刷新列表。
+
+2.3 导出宏
+    位置：宏详情 [📤 导出]（内置宏也可导出）。
+    交互：
+      - 取当前已保存宏（不是编辑中的文本）；
+      - 生成：
+          {name,description,category,target_app,steps}
+      - 以只读 textarea 展示；
+      - 点击文本自动全选；
+      - [📋 复制] 使用 navigator.clipboard；
+        不可用时提示“请选中 JSON 手动复制”；
+      - [收起导出] 关闭。
+    不包含 builtin/运行时字段，便于他人导入。
+
+2.4 宏失败自动降级
+    新增 host/lib/macros.js：
+      export const MACRO_RECOVERY_HINT =
+        '⚠️ 宏执行失败：可能由于窗口位置改变或加载延迟导致。' +
+        '建议：立刻切换为视觉慢车道（调用 vhcu_get_full_frame 观察屏幕），' +
+        '重新规划动作并执行。';
+      export function withMacroRecoveryHint(hint) { ... }
+    接入：
+      - executeStoredMacro 捕获异常：
+          hint = withMacroRecoveryHint(error.hint)
+      - executeStoredMacro 截图校验失败/坐标越界 warnings：
+          返回 hint = MACRO_RECOVERY_HINT
+      - executeMacroQueue 任一步失败/verify 失败：
+          hint = withMacroRecoveryHint(原 hint / 队列中止提示)
+    效果：
+      模型收到 vhcu_run_macro 或 vhcu_run_macro({macros_queue}) 失败时，
+      hint 中一定包含“切换为视觉慢车道 + vhcu_get_full_frame”的强提示。
+
+====================================================================
+3. 证据
+====================================================================
+3.1 源码
+    lib/client.js：
+      vhcu-danger / armed / 二次确认；
+      importMacros（JSON 解析 + 校验 + onCreateMacro）；
+      exportDetail / copyExport；
+      import/export/delete UI。
+    lib/index.js：
+      import { MACRO_RECOVERY_HINT, withMacroRecoveryHint }；
+      executeStoredMacro catch/verify/warnings hint；
+      executeMacroQueue hint。
+    host/lib/macros.js：
+      MACRO_RECOVERY_HINT、withMacroRecoveryHint。
+3.2 测试
+    Node 82/82 通过；
+    Python 88/88 通过；
+    macros.test：
+      - hint 包含窗口位置改变/vhcu_get_full_frame/视觉慢车道；
+      - 有原 hint 时拼接；重复 hint 不重复拼接。
+    client.test：
+      - 🗑 删除此宏 / 再点一次确认删除；
+      - 📥 导入宏 / 📤 导出；
+      - vhcu-danger、navigator.clipboard；
+      - 无 window.confirm；
+      - importMacros 存在。
+    plugin.test：既有 /vhcu/macros delete API 仍通过。
+3.3 未实测
+    - 真实 DSH 窗口中删除/导入/导出视觉效果；
+    - 21 步录制宏从详情删除后的端到端；
+    - 导入重复名称/非法 steps 的真实服务端返回；
+    - 宏失败 hint 的真实模型消费行为。
+
+====================================================================
+4. 风险与未验证项
+====================================================================
+R1. 删除为二次确认，第一次点击不会立即删除；这是防误删设计。
+R2. 导入失败可能部分成功（逐个保存），提示第几个失败；
+    已导入的前 N 个不会回滚。
+R3. 导入分类固定为当前组；跨组导入需要先切组。
+R4. 导出复制依赖 navigator.clipboard；不可用时只能手动选中。
+R5. “坐标点击未生效”本身无法由 SendInput 返回值检测；
+    当前 hint 覆盖：E_MACRO_FAILED、宏步骤异常、截图校验失败、
+    坐标越界 warnings。真正的“点击成功但界面无变化”仍需
+    模型主动调用 vhcu_get_full_frame 观察。
+R6. 内置宏不可删除；只可禁用/启用或导出复制。
+R7. 本轮未改 Python 宏执行器。
+
+====================================================================
+5. 待确认决策（编号）
+====================================================================
+D1. 删除按钮只对 builtin=false 显示，二次确认。
+D2. 导入支持单个对象/数组/{macros}/{macro} 四种形态。
+D3. 导入到当前自定义组；系统基础宏组回退“我的自定义宏”。
+D4. 导出为纯宏 JSON，不含 builtin。
+D5. 宏失败 hint 强制附加视觉慢车道提示。
+D6. 不引入 window.confirm/prompt。
+
+====================================================================
+6. 下一步计划
+====================================================================
+N1. 完全退出 DSH → 重开。
+N2. ⚙ → 我的自定义宏 → 点开宏：
+      底部应看到红色「🗑 删除此宏」；
+      点两次后宏从列表消失。
+N3. 点「📥 导入宏」粘贴宏 JSON → 确认 → 列表出现。
+N4. 点开宏 →「📤 导出」→ 复制 JSON。
+N5. 用 vhcu_run_macro 触发一次失败，检查返回 hint 是否包含
+    “切换为视觉慢车道 / vhcu_get_full_frame”。
+
+（报告完）

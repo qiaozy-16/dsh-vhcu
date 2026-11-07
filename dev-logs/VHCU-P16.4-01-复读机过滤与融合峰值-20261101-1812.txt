@@ -1,0 +1,157 @@
+DSH-VHCU  P16.4-01  复读机幻听过滤 + 融合峰值粒度
+生成时间：2026-11-01 18:12 (Asia/Shanghai)
+阶段：P16.4（音频系统最后一轮精修）
+前置：P16.3 精准短词过滤/尖峰完成
+
+====================================================================
+0. 结论（先看这 6 条）
+====================================================================
+C1. 新增 is_repetitive_text()：文本内同一单词/短语重复 ≥3 次，
+    判定循环幻听并丢弃（例如 "When the fire burns out" ×4）。
+C2. 中文连续片段按 2-8 字 n-gram 检测，重复 ≥3 次同样丢弃。
+C3. 单字停用词（the/a/and...）重复 3 次不触发，避免误杀。
+C4. 融合听觉字段改为 [RMS:0.16 | 峰值:0.45]，
+    audio_rms_max / audio_rms_min 继续作为字段返回。
+C5. soundcard 内录无软件 Gain 参数；保持现状，[H] 面板增加
+    “音量偏低时请调高系统音量（软件内录无增益）”提示。
+C6. 测试：Node 61/61、Python 82/82。
+
+====================================================================
+1. 复读机幻听过滤（hear.py）
+====================================================================
+1.1 is_repetitive_text(text, min_repeat=3)
+      英文：
+        - 提取小写单词（字母/数字/撇号）；
+        - 对 n=1..min(8, len/3+1) 统计 n-gram 出现次数；
+        - 任一 n-gram >=3：
+            n>=2 直接判定；
+            n==1 要求单词长度 >=3 且不是停用词
+            （the/a/an/and/to/of/i/you/it/is/in/on 不触发）。
+      中文：
+        - 提取连续汉字片段；
+        - 对 n=2..min(8, len/3+1) 统计重复；
+        - 任一 >=3 → 判定。
+      示例：
+        "When the fire burns out " * 4 → True（5-gram ×4）
+        "fire fire fire" → True（单词 ×3）
+        "爆炸爆炸爆炸" → True（2 字 ×3+）
+        "请打开设置，然后点击保存" → False
+        "the the the" → False（单字停用词）
+1.2 调用位置
+      _flush_segment 转写完成后、短词过滤之前：
+        if is_repetitive_text(text):
+            print("[hear] discarded repetitive hallucination: ...")
+            emit_ambient("repetitive")   # rms>=0.03 时仍有 🎵
+            return
+      → 不 emit hear.text，不进入融合文本。
+1.3 未改动
+      - 短词三条件过滤保持；
+      - whisper 参数保持；
+      - 环境音阈值 0.03 保持。
+
+====================================================================
+2. 融合层暴露 RMS 峰值（fusion.js）
+====================================================================
+2.1 已有字段
+      audio_count, audio_rms, audio_rms_max, audio_rms_min, has_spike。
+2.2 显示格式
+      audioText = `[RMS:${avg} | 峰值:${max}${hasSpike ? ' 💥 巨响/音效' : ''}]`
+      示例：
+        👂 [RMS:0.16 | 峰值:0.45]
+        👂 [RMS:0.08 | 峰值:0.50 💥 巨响/音效]
+      hear_text / hear 字段同步；仅音频、音频+转写、both 均适用。
+2.3 工具
+      vhcu_get_multimodal_events 每条继续返回
+      audio_rms / audio_rms_max / audio_rms_min / has_spike，
+      模型可比对平均与峰值。
+2.4 UI
+      [M] 融合行听觉 chip 直接显示上面的字符串；
+      8 秒窗口内即使平均只有 0.16，峰值 0.45 仍可见。
+
+====================================================================
+3. 环境底噪/增益（检查结果）
+====================================================================
+3.1 检查
+      _open_loopback 使用 soundcard default_speaker / get_microphone /
+      mic.recorder(samplerate=16000, channels=1)；
+      soundcard 没有暴露软件 Gain 参数，当前代码也未做数字增益。
+3.2 处理
+      保持现状，不引入未验证的放大器；
+      [H] 面板 hear-meta 下增加静态提示：
+        “音量偏低时请调高系统音量（软件内录无增益）”。
+3.3 说明
+      0.16 偏低多半是系统播放音量/应用音量；调高系统音量即可，
+      无需改采集代码。
+
+====================================================================
+4. 测试
+====================================================================
+Node 61/61
+  - fusion：视觉+音频 both、audio_rms_max/min、hear_text
+    `[RMS:0.15 | 峰值:0.40]`；
+  - 尖峰：has_spike true、hear_text 含 💥；
+  - client：fps 等待态、音量提示；
+  - 其余保持。
+Python 82/82
+  - RepetitionHallucinationTest：
+      "When the fire burns out "×4 → true；
+      "fire fire fire" → true；
+      "爆炸爆炸爆炸" → true；
+      "请打开设置..." → false；
+      单次 "When..." → false；
+      "the the the" → false；
+      _flush_segment：重复文本不 emit hear.text，但有 hear.audio；
+  - P16.3 短词三条件/尖峰/包络测试保持。
+
+====================================================================
+5. 重启验证
+====================================================================
+5.1 完全退出 DSH（无 python.exe/Electron 残留）→ 重开。
+5.2 复读机
+  1) [H] Hear 开启；
+  2) 播放之前触发 "When the fire burns out..." 重复的爆炸/音乐片段；
+  3) 不应再出现重复 4 次的转写；
+  4) 仍应出现 🎵 环境音（rms>=0.03）；
+  5) 日志可见：
+       [hear] discarded repetitive hallucination: 'When the fire...'
+5.3 融合峰值
+  1) 同时开启视觉 + 听觉；
+  2) 播放有爆炸/鼓点且画面变化的视频；
+  3) [M] 行应显示：
+       👂 [RMS:0.16 | 峰值:0.45]
+     尖峰时追加 💥 巨响/音效；
+  4) vhcu_get_multimodal_events 应返回 audio_rms_max/min。
+5.4 音量
+  - 若环境音音量偏低，调高 Windows/播放器音量；
+  - [H] 面板提示可见。
+5.5 回归：短词过滤、fps 等待、隐私、坐标、watchdog、破坏键确认保持。
+
+====================================================================
+6. 文件改动
+====================================================================
+【新增】
+  VHCU-P16.4-01-复读机过滤与融合峰值-20261101-1812.txt（本报告）
+【修改】
+  vision/vhcu_daemon/hear.py   is_repetitive_text、调用与日志
+  vision/tests/test_hear.py    复读误杀/正常用例
+  host/lib/fusion.js           audioText [RMS | 峰值]
+  host/test/fusion.test.mjs    新格式断言
+  lib/client.js                音量提示（无结构改动）
+  host/test/client.test.mjs    音量提示断言
+  package.json / dsh.plugin.json 0.25.0
+  README.md                    P16.4 说明
+【备份】
+  hear.py.bak、fusion.js.bak、index.js.bak、client.js.bak、
+  package.json.bak、dsh.plugin.json.bak、README.md.bak
+
+====================================================================
+7. 已知边界
+====================================================================
+R1. 重复检测基于 n-gram：真实歌词/演讲有意重复 3 次也会被丢。
+R2. 中文只检测连续汉字片段；中英混合重复可能漏检。
+R3. 单字停用词重复不触发；其他 3 字母以上单词仍可能误判。
+R4. 融合显示只用平均与峰值；谷值仍在字段中，不写进 hear_text。
+R5. soundcard 无软件增益；调系统音量是唯一手段。
+R6. 真实复读/爆炸片段需重启后人工验证。
+
+（报告完）

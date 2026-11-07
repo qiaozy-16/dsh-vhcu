@@ -1,0 +1,114 @@
+DSH-VHCU  P17.2-01  紧急制动文字按钮 + 专精宏测试指南
+生成时间：2026-11-01 19:37 (Asia/Shanghai)
+阶段：P17.2（软件专精宏实战准备）
+范围：UI 紧急制动文案/布局；P17.2 测试执行指南；不修改宏引擎与安全后端。
+
+====================================================================
+1. 时间 / 阶段 / 范围
+====================================================================
+  时间：2026-11-01 19:37 +08:00
+  阶段：P17.2
+  范围：
+    - lib/client.js：紧急制动按钮由 28×28 图标改为带文字的长条按钮
+      （4 字中文，padding 4px 8px，非全宽）；
+    - 新增工作区文件 VHCU-P17.2-测试执行指南.md；
+    - 不改 /vhcu/emergency-stop、不改 taskkill、不改宏引擎。
+
+====================================================================
+2. 本轮交付物
+====================================================================
+2.1 UI
+    - 删除 ⏹ 图标按钮；
+    - 新增按钮文本「紧急制动」；
+    - 位置：顶栏「开启/关闭视觉」之后、⚙ 之前，同一行；
+    - 样式：
+        .vhcu-btn vhcu-emergency-btn
+        padding 4px 8px；红色文字 #f87171；暗红描边 #5b1a1a；
+        深色底 #1a1113；font-size 11px；
+        悬停 #dc2626 / #fecaca / #241316。
+        顶栏同步压缩：gap 4px、padding 8px，保证三个按钮同一行不溢出。
+    - tooltip：紧急制动（Ctrl+Shift+X）：停止视觉/听觉并强制结束 Python。
+    - ⚙ 设置顶部提示保持：“紧急情况可按 Ctrl+Shift+X 强制停止”。
+    - 键盘监听保持：Ctrl+Shift+X → /vhcu/emergency-stop。
+2.2 指南
+    文件：VHCU-P17.2-测试执行指南.md
+    内容：
+      0. 测试前准备（重启 DSH、开视觉、确认顶栏）；
+      1. 第一步提示词：Win+R calc、视觉定位数字键、点 888×666=，
+         回读 591408；
+      2. 第二步提示词：保存 macro_calc_multiply，
+         target_app=Calculator/计算器，变量 a/b，
+         steps 参数化为 esc→type{{a}}→type*→type{{b}}→enter→wait；
+      3. 第三步提示词：关窗、重开、vhcu_get_active_window、
+         vhcu_get_recommended_macros 验证命中，执行 123×456=56088；
+      4. 通过标准 checklist；
+      5. 测试记录模板；
+      6. 备注/排错表。
+    关键防坑：
+      - 不保存绝对坐标 click，否则新题会点旧数字；
+      - target_app 必须与窗口标题子串匹配；
+      - 打开计算器用 Win+R/calc，不用 macro_launch_app 配空 text；
+      - 重名 E_CONFLICT 先在宏管理删除。
+
+====================================================================
+3. 证据
+====================================================================
+3.1 实读源码
+    - lib/client.js：
+        顶栏 h('button', className:'vhcu-btn vhcu-emergency-btn', '紧急制动')；
+        useEffect 注册 window keydown，Ctrl+Shift+X；
+        设置 hint 保留。
+    - lib/index.js：
+        vhcu_save_macro 参数 name/description/category/target_app/steps；
+        vhcu_run_macro 支持 variables；
+        vhcu_get_recommended_macros 返回 active_window/macros/variables。
+    - host/lib/macros.js：seedMacros 18 个；target_app 匹配；
+    - vision/vhcu_daemon/input.py：run_macro 变量替换/缺变量 E_PROTO；
+      空 type 有失败风险，因此指南改用 Win+R 手动打开。
+3.2 实测
+    - Node 67/67 通过；
+    - Python 88/88 通过；
+    - client.test 断言 vhcu-emergency-btn、Ctrl+Shift+X、keydown、
+      emergency-stop、无全宽按钮。
+3.3 未实测
+    - 真实计算器 888×666 / 123×456 全流程（需用户按指南测试）；
+    - Calculator 与计算器两种标题的推荐命中；
+    - 宏执行时视觉坐标/窗口位置差异。
+
+====================================================================
+4. 风险与未验证项
+====================================================================
+R1. 计算器窗口标题可能是 "Calculator" 或 "计算器"；
+    指南要求在第一步用 vhcu_get_active_window 记录并据实填写 target_app。
+R2. 若模型保存了 click 绝对坐标，123×456 会点错；
+    指南明确要求重存参数化 key/type 版本。
+R3. Windows Calculator Esc 通常清空当前计算；若行为不同，
+    指南要求模型回读并可用 Esc/CE 调整。
+R4. 触发 Ctrl+Shift+X 需要 DSH 窗口聚焦；不是 OS 全局热键。
+R5. 紧急制动 taskkill /F /IM python.exe 会杀所有 python.exe；
+    测试期间不要同时跑其他 Python 任务。
+R6. 本轮未改后端；/vhcu/emergency-stop 与 taskkill 保持 P18 逻辑。
+
+====================================================================
+5. 待确认决策（编号）
+====================================================================
+D1. target_app 的最终取值由第一步实际窗口标题决定：
+    "Calculator" 或 "计算器"；指南已给出二选一，不写死。
+D2. 保存宏时使用参数化 key/type（不是绝对坐标 click）；
+    如用户坚持保存 click 版本，新题复用性不保证。
+D3. 重开计算器采用 Win+R/calc，不使用 macro_launch_app(text="")；
+    避免空 type 步骤失败。
+D4. 快捷键只承诺 DSH 聚焦，不承诺 OS 全局。
+
+====================================================================
+6. 下一步计划
+====================================================================
+N1. 用户按 VHCU-P17.2-测试执行指南.md 实测：
+    888×666 → 保存 → 关窗重开 → 推荐 → 123×456。
+N2. 将实测结果（窗口标题、推荐列表、56088、耗时）回填本报告。
+N3. 若推荐未命中：检查 target_app 与窗口标题子串；
+    若执行失败：检查宏 steps/变量/E_DENIED。
+N4. 成功后可将 macro_calc_multiply 作为首个“专精宏”样例，
+    再扩展浏览器/Office 专精宏。
+
+（报告完）

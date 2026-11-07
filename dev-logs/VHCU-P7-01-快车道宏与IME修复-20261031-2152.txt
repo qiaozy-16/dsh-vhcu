@@ -1,0 +1,177 @@
+DSH-VHCU  P7-01  快车道预设宏（Macro）+ IME Ctrl+空格修复 交付报告
+生成时间：2026-10-31 21:52 (Asia/Shanghai)
+阶段：P7（执行层提速：把多步固定操作收敛为一次工具调用）
+前置：P6 全链路已跑通；本轮按惯例先备份再改
+
+====================================================================
+0. 结论（先看这 7 条）
+====================================================================
+C1. IME 修复：type_text 检测到输入法开启时，改为发送 **Ctrl+空格**（120ms 后复查，
+    仍开启再发一次），不再按 Shift；返回 imeOpen/imeAfter/imeToggled。
+C2. 新增 2 个 Python 宏：
+      macro_open_notepad_and_type(text)：Win+R → 输入 notepad → 回车 → 等 1 秒 → 输入文本
+      macro_save_file()：发送 Ctrl+S
+    任一环节异常统一抛 E_MACRO_FAILED（消息带已完成的步骤）。
+C3. Node 注册 2 个工具（共 11 个）：
+      vhcu_macro_open_notepad_and_type(text)
+      vhcu_macro_save_file()
+    Description 含指定语句「当用户需要执行一整套连贯的固定操作时，优先调用此宏，
+    比单步操作快得多」。
+C4. 宏安全铁律：Node 侧强制先 start_vision（否则 E_STATE）；宏执行完自动调用
+    vision.capture 抓全屏并返回签名 frame_url（verify.ok），无需再手动回读；
+    自动截图失败则 verify.ok=false 并提示补一次 vhcu_get_full_frame。
+C5. 协议扩容：OPS/cmd schema 增加 input.macro.open_notepad / input.macro.save；
+    cli.py 分发到 InputController。
+C6. 测试：Node 32/32、Python 39/39。新增：宏 dry-run（steps/elapsedMs）、宏前
+    E_STATE、宏后 pending 已清、save 宏回读门禁、IME Ctrl+空格 描述断言。
+C7. 生效需完全重启 DSH；日志 registered 11 tools。
+
+====================================================================
+1. IME 修复（Ctrl+空格）
+====================================================================
+1.1 问题
+  P6.2 用 Shift 切中英；用户系统实际是 Ctrl+空格。按 Shift 可能产生大写/乱码。
+1.2 实现（input.py）
+  - _ensure_ascii_input()：
+      before = ime_open_status()
+      若未开启 → (False, before, before)，不发送任何按键；
+      若开启 → _send_combo([CTRL, SPACE]) → sleep 0.12 → 复查
+                仍开启 → 再发一次 → sleep 0.12 → 复查
+      return (True, before, after)
+  - type_text：调用 _ensure_ascii_input() 后再逐字注入；
+    返回 {chars, imeOpen, imeAfter, imeToggled}。
+  - 宏内部在输入 "notepad" 前、输入正文前各调用一次（防止运行框/编辑器重置 IME 状态）。
+  - _lock 改为 RLock，使宏可以复用 type_text/_send_combo 等原语而不死锁。
+1.3 Node 侧
+  - Description 由 Shift 改为「按 Ctrl+空格 切换英文（无效会再试一次）」。
+  - 返回体增加 ime_open / ime_after / ime_toggled；message 标注是否切过英文。
+  - 乱序兜底仍提示用户切英文，或先 vhcu_key_press(["ctrl","z"]) 撤销。
+
+====================================================================
+2. 快车道宏
+====================================================================
+2.1 Python（input.py）
+  macro_open_notepad_and_type(text):
+    rate_limit + failsafe
+    dry_run → {dryRun:true, steps:[win+r, type:notepad, enter, wait:1000, type:text], elapsedMs:0}
+    实际：
+      _send_combo([WIN, R])         steps += win+r
+      sleep(0.35)
+      _ensure_ascii_input()
+      _type_unicode("notepad")      steps += type:notepad
+      _tap_vk(ENTER)                steps += enter
+      sleep(1.0)
+      _ensure_ascii_input()
+      _type_unicode(text)           steps += type:text
+      返回 {dryRun:false, action:'macro.open_notepad_and_type', chars, steps, elapsedMs}
+    异常 → InputError("E_MACRO_FAILED", f"macro open_notepad failed after {steps}: {err}", hint)
+  macro_save_file():
+    rate_limit + failsafe
+    dry_run → {dryRun:true, steps:['ctrl+s'], elapsedMs:0}
+    实际：_send_combo([CTRL, S])；异常 → E_MACRO_FAILED
+2.2 协议（contract + cli）
+  OPS / cmd.json op enum 增加：
+    input.macro.open_notepad、input.macro.save
+  cli.py：
+    input.macro.open_notepad → input.macro_open_notepad_and_type(text)
+    input.macro.save         → input.macro_save_file()
+  InputError → ack error（E_MACRO_FAILED 原样透传）。
+2.3 Node 工具（lib/index.js）
+  vhcu_macro_open_notepad_and_type(text)：
+    - 校验 text 非空/≤2000；
+    - runInputAction('input.macro.open_notepad', {text}, {timeoutMs:20000})；
+    - 成功后自动 captureFullFrame({max_width:1280})，markReadback()；
+    - 返回 {ok, macro, dry_run, elapsed_ms, steps, frame_url, verify}；
+    - 失败 → {ok:false, code: error.code ?? 'E_MACRO_FAILED', error, hint}。
+  vhcu_macro_save_file()：同上（timeout 10s，max_width=1280）。
+  两个 Description 均包含指定语句，并写明：需先 start_vision、失败 E_MACRO_FAILED、
+  自动全屏校验、无需再单独回读。
+
+====================================================================
+3. 安全审计对照
+====================================================================
+  先看后做：runInputAction 统一检查 state.phase=running + supervisor ready，否则 E_STATE ✔
+  宏内失败：Python 每步 catch → E_MACRO_FAILED（带 steps）✔
+  执行后校验：Node 自动 vision.capture → 签名 frame_url + verify.ok ✔
+  四角急停：宏入口 _failsafe()（光标在角落直接 E_DENIED，由 _input 映射）✔
+  限流：宏算 1 次动作（Node 8/10s；Python 内部 12/5s 仍对子动作计数）✔
+  回读门禁：宏成功自动抓帧即清除 pending，不阻塞下一次动作 ✔
+  长度/键位：文本 ≤2000；宏内部只用固定键位（win+r / enter / ctrl+s）✔
+
+====================================================================
+4. 测试与验证
+====================================================================
+4.1 Node 32/32（contract 10 / supervisor 9 / integration 2 / plugin 8 / client 3）
+  P7 用例：
+    - 11 个工具名称/数量；type_text 描述含 Ctrl+空格；宏描述含指定短语；
+    - 未开视觉调用宏 → E_STATE；
+    - start 后 open_notepad 宏 → ok、macro 名、dry_run、steps 含 win+r、elapsed_ms 数字；
+    - 宏自动截图后 pending 已清：紧接着 type_text 可直接执行（ok）；
+    - type 后未回读 → save 宏 E_STATE；get_events 后 save 宏 ok、steps=['ctrl+s']。
+  （宏的 dry-run 不注入键鼠；自动截图是只读抓屏，安全。）
+4.2 Python 39/39
+  - MacroTest：open_notepad dry-run 的 steps/chars；空文本 E_PROTO；save dry-run。
+  - IME 旧用例保持：ime_open_status 只读不抛；dry-run 返回 IME 字段。
+4.3 未自动化
+  - 真实 Ctrl+空格 对用户输入法的效果（避免干扰）；
+  - 真实宏（会打开记事本并输入）——按第 5 节人工验收。
+
+====================================================================
+5. 重启与验收
+====================================================================
+5.1 重启
+  ① 完全退出 DSH（托盘退出；任务管理器确认 Electron/python.exe 无残留）；
+  ② 重新打开 DSH；新开会话；
+  ③ 日志确认：dsh-vhcu: registered 11 tools。
+5.2 测试指令（用户指定）
+  发给模型：
+  「用 vhcu_start_vision 开视觉；然后调用 vhcu_macro_open_notepad_and_type，
+    输入「VHCU P7 宏测试」；告诉我 elapsed_ms、steps 和返回的 frame_url；
+    再用 vhcu_get_vision_events 回读确认；最后 vhcu_stop_vision。」
+  预期：
+    - 一次工具调用完成 运行框→notepad→回车→等待→输入；
+    - elapsed_ms 约 1500–3000ms（比逐步 click/type 多次往返快得多）；
+    - frame_url 为签名全屏图，verify.ok=true；
+    - 回读能看到记事本内容。
+5.3 保存宏
+  「用 vhcu_macro_save_file 保存当前文件；回读确认是否出现保存对话框。」
+5.4 若宏失败
+  - E_STATE：未先 start_vision。
+  - E_MACRO_FAILED（消息含 steps）：Win+R 被拦截 / notepad 启动慢 / 焦点被抢；
+    可延长等待需求或改单步操作；错误 hint 会提示先回读确认。
+  - E_DENIED：鼠标在屏幕角落急停。
+  - E_BUSY：限流，等待窗口结束。
+  - verify.ok=false：宏成功但自动截图失败，补调 vhcu_get_full_frame。
+
+====================================================================
+6. 文件改动
+====================================================================
+【新增】
+  VHCU-P7-01-快车道宏与IME修复-20261031-2152.txt（本报告）
+【修改】（覆盖前已改名 .bak）
+  vision/vhcu_daemon/input.py     Ctrl+空格 IME；RLock；宏宏原语/宏方法
+  vision/vhcu_daemon/cli.py       分发 input.macro.open_notepad / input.macro.save
+  contract/lib/contract.js        OPS 两个宏
+  contract/schema/v1/cmd.json     op enum 两个宏
+  lib/index.js                   captureFullFrame 抽取；宏工具 + 自动校验；IME 文案/字段
+  vision/tests/test_input.py      MacroTest（3 项）
+  host/test/plugin.test.mjs       工具数 11；P7 宏用例；IME/宏描述断言
+  package.json / dsh.plugin.json  0.7.0
+  README.md                       P7 说明、11 工具、IME、宏安全、验收、测试数
+【未改】
+  runner.py、httpframe.py、client.js、install.mjs
+
+备份：lib/index.js.bak、input.py.bak、cli.py.bak、contract.js.bak、cmd.json.bak、
+      test_input.py.bak、plugin.test.mjs.bak、package.json.bak、dsh.plugin.json.bak、
+      README.md.bak（均为本次修改前版本）。
+
+====================================================================
+7. 已知边界与下一步
+====================================================================
+R1. 宏依赖 Win+R 与系统 notepad；被组策略/安全软件禁用时会 E_MACRO_FAILED。
+R2. 宏等待 1s 对慢机器可能偏短；后续可加 retry/自适应等待（先看窗口是否出现）。
+R3. 真实 Ctrl+空格 切换需人工验收；若用户 IME 用其他切换键，可加可配置 hotkey。
+R4. 宏是固定编排；下一步可扩展 macro_focus_window(title)、macro_copy_paste 等。
+R5. 仍只支持主屏；多屏/混合 DPI 留 P8。
+
+（报告完）

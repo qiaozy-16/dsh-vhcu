@@ -1,0 +1,235 @@
+DSH-VHCU  P5-01  Computer Use 执行层（3 个安全宏）交付报告
+生成时间：2026-10-31 20:45 (Asia/Shanghai)
+阶段：P5（给模型装“双手”：点击 / 输入 / 组合键；真实 Windows SendInput）
+前置：P4 视觉 V2 已通过；本轮按惯例先备份再改
+
+====================================================================
+0. 结论（先看这 7 条）
+====================================================================
+C1. 新增 3 个工具：vhcu_mouse_click(x,y) / vhcu_type_text(text) / vhcu_key_press(keys)；
+    连同视觉 3 工具，插件现在共 6 个工具。
+C2. 输入层用 Windows 原生 SendInput（ctypes，标准库），**不需要 pyautogui/Pillow**；
+    进程启动即声明 Per-Monitor-V2 DPI awareness，坐标全部按主屏物理像素处理。
+C3. 安全设计四层：① 先看后点（视觉未运行直接 E_STATE）；② 四角急停（等价
+    pyautogui.FAILSAFE，光标在屏幕角落则 E_DENIED）；③ 双层限流（Node 8 次/10s、
+    Python 12 次/5s）；④ 键位白名单 + 坐标边界 + 文本 2000 字上限。
+C4. 回读校验写进 Description 与返回值：点击后 400ms、输入/组合键后 300ms 调
+    vhcu_get_vision_events 复核；返回体带 verify:{tool,after_ms}。
+C5. 协议扩容：contract OPS / cmd schema 新增 input.click、input.type、input.hotkey；
+    Python daemon 分发到 InputController，并把 InputError 映射成 E_PROTO/E_DENIED/
+    E_BUSY/E_UNAVAILABLE/E_INTERNAL。
+C6. 测试：Node 29/29、Python 29/29。P5 自动化全部走 VHCU_INPUT_DRY_RUN=1（只校验
+    不注入），真实注入需按第 5 节人工验收；避免自动化测试乱动桌面。
+C7. 生效需要完全重启 DSH；工具表在启动时构建，旧会话不热更新。
+
+====================================================================
+1. Python 端：真实键鼠注入（vision/vhcu_daemon/input.py，新增）
+====================================================================
+1.1 结构
+  - MOUSEINPUT / KEYBDINPUT / HARDWAREINPUT / INPUT 联合体（64 位 ULONG_PTR）。
+  - enable_dpi_awareness()：SetProcessDpiAwarenessContext(-4) → shcore(2) → SetProcessDPIAware()
+    依次降级，保证 GetSystemMetrics 与 SendInput 都按物理像素。
+  - primary_size() / cursor_position() / in_corner()：四角 8px 判定。
+  - normalize_click(x,y,w,h)：越界即 E_PROTO；绝对坐标归一化到 0..65535。
+  - parse_hotkey(keys)：1-4 个键，最后一位必须是真实键；支持 ctrl/shift/alt/win +
+    a-z/0-9/方向/enter/tab/esc/space/backspace/delete/home/end/pageup/pagedown/f1-f12。
+  - validate_text(text)：非空、≤2000 字符。
+  - InputController：click / type_text / key_press，内部锁 + 限流 + failsafe + SendInput。
+1.2 关键实现
+  - 鼠标：MOUSEEVENTF_MOVE|ABSOLUTE + LEFTDOWN + LEFTUP，dx/dy 归一化。
+  - 组合键：修饰键按下 → 主键按下/抬起 → 修饰键逆序抬起。
+  - 文本：逐字符 KEYEVENTF_UNICODE（按 UTF-16 code unit 发送，中文/emoji 均支持）；
+    \n → Enter，\t → Tab。
+  - VHCU_INPUT_DRY_RUN=1：只做参数/边界/键位校验并返回 dryRun:true，不调用 SendInput。
+1.3 安全
+  - 每次动作前读真实光标；落在任一角落 → InputError(E_DENIED, "mouse failsafe...")。
+  - 本地限流 12 次/5s（Node 层还有 8 次/10s，双保险）。
+  - 主屏边界校验，越界拒绝；多屏 V1 不支持（后续用虚拟屏幕坐标）。
+
+====================================================================
+2. 协议与 daemon（修改）
+====================================================================
+2.1 contract
+  - OPS 增加：input.click、input.type、input.hotkey（其余工具/路由不变）。
+  - contract/schema/v1/cmd.json 的 op enum 同步扩容。
+2.2 vision/vhcu_daemon/cli.py
+  - 新增 self.input = InputController()；READY.capabilities.input 携带
+    {dryRun,dpiMode,screen}。
+  - sys.info 返回 input.status()。
+  - 分发：
+      input.click  args {x,y}       → input.click
+      input.type   args {text}      → input.type_text
+      input.hotkey args {keys[]}    → input.key_press
+    InputError → ProtocolError(code,hint)，ack ok:false，模型可读。
+
+====================================================================
+3. Node 端：3 个工具（lib/index.js）
+====================================================================
+3.1 vhcu_mouse_click(x,y)
+  Description（模型可读原文，含指定措辞）：
+    「在指定物理坐标执行一次鼠标左键单击。**当你通过视觉工具（vhcu_get_vision_events）
+     获取到了屏幕元素的具体坐标后，调用此工具去点击它**：x/y 使用事件里 ROI 的绝对像素
+     坐标（与 frame_url 裁剪区域同一坐标系，主屏物理像素；已处理 DPI 缩放，直接传 vision
+     给的值，不要自己乘缩放）。调用前必须先 vhcu_start_vision；点击后请等待约 400ms，
+     再次调用 vhcu_get_vision_events 读取画面，确认点击是否生效（回读校验）。
+     安全：屏幕四角被用作人工急停区…」
+  参数：x/y integer ≥0，required。
+  返回：{ok, action:'click', x, y, dry_run, message, verify:{tool,after_ms:400}}
+3.2 vhcu_type_text(text)
+  Description：逐字符 Unicode 注入（非剪贴板，支持中文）；先点输入框再输入；
+    输入后 300ms 回读；≤2000 字符，\n/\t 约定；要求先 start_vision。
+  参数：text string 1..2000。
+3.3 vhcu_key_press(keys)
+  Description：组合键数组，1-4 个，修饰键在前、真实键最后；示例 ["ctrl","s"]、
+    ["win","d"]、["alt","tab"]；按后 300ms 回读；要求先 start_vision。
+  参数：keys array<string> 1..4。
+3.4 公共守卫 runInputAction()
+  - 视觉未运行 / supervisor 未 ready → 抛 E_STATE（提示先 start_vision）；
+  - 滑动窗口限流：VHCU_ACTION_MAX（默认 8）/ VHCU_ACTION_WINDOW_MS（默认 10000）；
+  - 通过后 supervisor.send(op,args,{timeoutMs:5000})。
+  - 错误统一转 {ok:false, code, error, hint}，不会把异常抛给模型宿主。
+
+====================================================================
+4. 依赖与安装
+====================================================================
+- 输入层：无第三方依赖（ctypes 标准库）。**不需要 pyautogui**。
+- 视觉层：仍为可选 mss；已有则无需操作。
+- 若新机器尚未安装 mss（只影响真实抓屏，不影响 P5 代码加载）：
+    py -3 -m pip install mss
+- 环境变量（可选）：
+    VHCU_INPUT_DRY_RUN=1     只校验不注入（自动化测试/演示）
+    VHCU_ACTION_MAX=8        Node 侧单窗口动作上限
+    VHCU_ACTION_WINDOW_MS=10000  限流窗口
+
+====================================================================
+5. 重启与人工验收
+====================================================================
+5.1 重启
+  ① 完全退出 DSH（托盘退出 / 任务管理器确认 Electron 进程结束）；
+  ② 重新打开 DSH；新开会话；
+  ③ 日志确认：
+       dsh-vhcu: mounted (routes /vhcu/state|events|control|frame)
+       dsh-vhcu: registered 6 tools
+5.2 验收提示词
+  A. 看 → 点 → 回读（最重要的闭环）：
+     「用 vhcu_start_vision 开视觉；用 vhcu_get_vision_events 找到屏幕上某个按钮的坐标；
+       用 vhcu_mouse_click 点击它；等 1 秒再用 vhcu_get_vision_events 确认画面变化；最后 stop。」
+     预期：click 返回 ok + dry_run:false；回读出现新的 ROI。
+  B. 输入文本：
+     「打开记事本，点击编辑区，用 vhcu_type_text 输入「VHCU 你好」，再用视觉回读确认。」
+  C. 组合键：
+     「在记事本里用 vhcu_key_press(["ctrl","s"])，回读看是否弹出保存对话框。」
+  D. 急停：
+     把鼠标移到屏幕任意角落，再让模型点击 → 应返回 E_DENIED（mouse failsafe）。
+  E. 限流：
+     连续点击超过 8 次 → 应返回 E_BUSY；等 10 秒恢复。
+5.3 失败排查
+  - E_STATE：没先 start_vision；先开视觉再操作（设计如此）。
+  - E_DENIED + mouse failsafe：鼠标在角落，移开重试。
+  - E_PROTO：坐标越界/键名不支持/文本为空或超长。
+  - E_UNAVAILABLE：非 Windows 或 SendInput 不可用。
+  - E_BUSY：触发限流，等待窗口结束。
+  - 点击有偏移：确认使用的是 vision 给的物理坐标；V1 只支持主屏（多屏会偏）。
+
+====================================================================
+6. 测试记录
+====================================================================
+6.1 Node 29/29
+  contract 10 / supervisor 9 / integration 2 / plugin 5 / client 3
+  P5 新增用例（dry-run）：
+    - 未开视觉时 click → E_STATE（先看后点）；
+    - start 后 click(100,100) → ok, dry_run:true, verify.after_ms=400；
+    - type_text("你好 vhcu") → ok；
+    - key_press(["ctrl","s"]) → ok；
+    - 第 4 次动作触发 E_BUSY（测试把上限设为 3/1500ms）；
+    - 非法键 ["ctrl","nope"] → E_PROTO；
+    - 越界点击 (-5,0) → E_PROTO；
+    - 2001 字符 → E_PROTO。
+6.2 Python 29/29（新增 11 项 test_input.py）
+    - normalize_click 边界/中心/越界；四角判定；键位解析（ctrl+s、win+d、alt+tab、
+      大小写、非法键、修饰键结尾、超长）；
+    - 文本长度；dry-run controller 的 click/type/hotkey/status。
+6.3 安装位置烟测
+    从 profile junction apply → tools 6 个（名称正确）；dispose 归零。
+6.4 dev harness
+    /vhcu/state 200；日志 "registered 6 tools"。
+6.5 未在自动化中执行的部分
+    - 真实 SendInput（会移动鼠标/敲键盘，故意不跑）；建议人工按 5.2 验收。
+    - 多显示器坐标、非 100% 缩放下的真实点击偏移（需人工核对）。
+
+====================================================================
+7. 文件改动（按要求列出）
+====================================================================
+【新增】
+  vision/vhcu_daemon/input.py        SendInput/DPI/failsafe/限流/键位/文本实现
+  vision/tests/test_input.py         11 项 Python 输入层单测
+  VHCU-P5-01-ComputerUse执行层-20261031-2045.txt（本报告）
+【修改】（覆盖前已改名 .bak，只保留最近一份）
+  contract/lib/contract.js           OPS 增加 input.click/type/hotkey
+  contract/schema/v1/cmd.json        op enum 同步
+  vision/vhcu_daemon/cli.py          接入 InputController、分发 3 个 input op、READY/sys.info
+  lib/index.js                       3 个输入工具 + runInputAction 守卫/限流/回读提示
+  host/test/plugin.test.mjs          工具数 3→6；新增 P5 dry-run 用例
+  package.json / dsh.plugin.json     version 0.5.0
+  README.md                          P5 说明、工具表、依赖、验收、安全设计
+【未改】
+  lib/client.js、vision/runner.py、vision/sources.py、contract 其余 schema、
+  cordis.patch.yml、scripts/install.mjs
+【工作区外】
+  profile junction/package.json 保持挂载，无需改动。
+
+备份：lib/index.js.bak / contract/lib/contract.js.bak / contract/schema/v1/cmd.json.bak /
+      vision/vhcu_daemon/cli.py.bak / package.json.bak / dsh.plugin.json.bak /
+      README.md.bak / host/test/plugin.test.mjs.bak。
+（dev/server.mjs、dev/mock-ctx.mjs 本轮未改。）
+
+====================================================================
+8. 已知边界与下一步
+====================================================================
+R1. 真实 SendInput 只在人工验收中执行；自动化用 dry-run 覆盖参数与协议链路。
+R2. V1 只支持主屏物理坐标；多屏/混合 DPI 需 P6 用虚拟屏幕 + 每屏 DPI。
+R3. 没有全局急停热键；现有中断手段 = 四角 failsafe + 限流 + 显式 stop_vision。
+    若要更强，可加 panic 文件/热键（VHCU_PANIC）。
+R4. 点击“回读校验”目前靠模型自觉；P6 可在 Node 侧强制：click 后 500ms 内必须调用
+    get_vision_events，否则下次输入工具返回 E_STATE（慢车道强制化）。
+R5. 文本输入依赖焦点；若焦点错误会打到别的窗口——Description 已要求先 click 再 type，
+    但仍是模型责任，P6 可加“焦点窗口标题回读”校验。
+R6. 多步宏（保存/复制/粘贴等预设）尚未做；当前是 3 个原子宏。
+
+P6 建议：
+  N1. 人工验收 5.2 A-E，记录真实点击偏移（如有）。
+  N2. 慢车道强制化：动作后必须回读，否则拒绝下一次输入。
+  N3. 预设宏（保存/全选/复制/粘贴/切换窗口）+ 宏白名单。
+  N4. 多屏与每屏 DPI 支持；panic 热键/文件。
+
+====================================================================
+附录 A：本轮聊天窗口回复原文（归档）
+追加时间：2026-10-31 20:45
+====================================================================
+P5 完成：新增 3 个输入工具 + Python 真实 SendInput 注入，共 6 个工具。
+
+- vhcu_mouse_click(x,y)：主屏物理坐标，DPI-aware；点击后提示 400ms 回读校验。
+- vhcu_type_text(text)：逐字符 Unicode（中文/emoji 可输入），≤2000 字。
+- vhcu_key_press(keys)：["ctrl","s"]、["win","d"] 等，1-4 键，修饰键在前。
+- 安全：先看后点（未开视觉 E_STATE）；四角急停 E_DENIED；Node 8/10s + Python 12/5s
+  双层限流 E_BUSY；键位白名单/坐标边界/文本上限。
+- 依赖：不需要 pyautogui；ctypes 标准库实现。可选 mss 保持原样：
+  py -3 -m pip install mss（未装才需要）。
+- 测试：Node 29/29、Python 29/29；自动化全部 dry-run，不碰真实桌面。
+- 生效需完全重启 DSH。重启后新会话按「看→点→回读」提示词验收。
+
+【新增】vision/vhcu_daemon/input.py / vision/tests/test_input.py /
+        VHCU-P5-01-ComputerUse执行层-20261031-2045.txt
+【修改】contract/lib/contract.js(.bak) / contract/schema/v1/cmd.json(.bak) /
+        vision/vhcu_daemon/cli.py(.bak) / lib/index.js(.bak) /
+        host/test/plugin.test.mjs(.bak) / package.json(.bak) / dsh.plugin.json(.bak) /
+        README.md(.bak)
+
+====================================================================
+附录 B：本轮记忆写入
+====================================================================
+memory_submit：P5 三工具与 SendInput 实现要点（DPI Per-Monitor-V2、四角 failsafe、
+双层限流、键位白名单、UTF-16 Unicode 输入）、眼睛先于手（未开视觉 E_STATE）、
+dry-run 环境变量、测试 29+29、重启与验收提示词、多屏/全局急停/慢车道强制化的边界。
+
+（报告完）

@@ -1,0 +1,166 @@
+DSH-VHCU  P10-01  宏管理 UI 改造（编辑/删除/分组）+ 键盘化文件夹宏
+生成时间：2026-11-01 09:29 (Asia/Shanghai)
+阶段：P10（宏 CRUD、分类折叠、绝对坐标宏改为纯键盘流）
+前置：P9 宏持久化与自生长已完成；本轮按惯例先备份代码文件
+
+====================================================================
+0. 结论（先看这 7 条）
+====================================================================
+C1. 宏列表每行可点击 → 详情/编辑面板：steps 原生 JSON 文本框可改，
+    提供「保存修改」与「删除宏」，分别调用 /vhcu/macros 的 update / delete。
+C2. 数据契约新增 category（默认 global）。旧 macros.json 加载时自动补
+    global 并回写；UI 按 category 分组折叠（▼ global (2) / ▶ explorer (1)）。
+C3. 新建宏表单新增「分类」输入；保存后即时出现在对应分组。
+C4. 已把真实 %LOCALAPPDATA%\dsh-vhcu\macros.json 里的
+    macro_create_vhcu_folder 替换为纯键盘步骤（无 mouse click）：
+      Win+E → wait 1500 → Ctrl+L → wait 300 → 输入 <local-path> → Enter → wait 800 →
+      Ctrl+Shift+N → wait 600 → 输入 VHCU_Learned → Enter → wait 500
+    并设置 category=explorer、描述改为“纯键盘…（无鼠标坐标）”。
+C5. 其它宏迁移为 category=global（open_notepad_and_type / save_file）。
+C6. API：POST /vhcu/macros 增加 action=update / delete；工具 vhcu_save_macro
+    新增可选 category 参数。
+C7. 测试：Node 37/37、Python 41/41；新增 category 默认/迁移/更新持久化、
+    API update/delete、带 category 的 save_macro 断言。
+
+====================================================================
+1. UI（lib/client.js）
+====================================================================
+1.1 列表 → 详情
+  - 每行 role=button/tabIndex=0，点击或 Enter/Space 打开详情；
+  - checkbox 的 onClick stopPropagation，不会误触发详情；
+  - 详情面板字段：
+      分类（可编辑，默认 global）
+      描述（可编辑）
+      steps（textarea，rows=9，原生 JSON）
+    按钮：保存修改 / 删除宏 / 返回列表
+  - 保存：JSON.parse(steps) → POST {action:'update', name, macro:{category,description,steps}}
+    失败（JSON 语法/校验）显示中文错误。
+  - 删除：POST {action:'delete', name} → 关闭详情并刷新列表。
+1.2 分组与折叠
+  - 客户端按 macro.category 分组；global 固定第一，其余按名称排序；
+  - 组头按钮：`▼ category (N)` / `▶ category (N)`，点击折叠/展开；
+  - 新建表单包含「分类（默认 global）」输入，保存后进入对应组。
+1.3 刷新
+  - 打开设置 → GET /vhcu/macros；
+  - 增删改后更新本地 macros/revision；
+  - 模型保存宏触发 status.macrosRevision 变化 → 打开着的浮层自动重拉。
+
+====================================================================
+2. 宏数据契约与 API
+====================================================================
+2.1 macros.js
+  - normalizeCategory(raw)：trim → 默认 'global'，≤40 字符；
+  - normalizeMacro 输出 {name,description,category,steps,enabled}；
+  - seedMacros 内置两条 category='global'；
+  - load()：若旧数据缺 category，解析后 persist 回写（一次性迁移）；
+  - update(name, patch)：合并 description/steps/category/enabled，重校验，
+    persist，revision++；name 本身不允许改（找不到 E_NOT_FOUND）。
+2.2 API
+  POST /vhcu/macros
+    {action:'save',   macro:{name,description,category,steps}}
+    {action:'toggle', name, enabled}
+    {action:'update', name, macro:{category?,description?,steps?,enabled?}}
+    {action:'delete', name}
+  GET /vhcu/macros → {ok, macros[], revision}
+2.3 工具
+  vhcu_save_macro(name, description, category?, steps)
+    category 缺省 global；其余校验/持久化同 P9。
+  vhcu_run_macro 不变；禁用时 E_DENIED。
+
+====================================================================
+3. 真实宏替换（已执行）
+====================================================================
+文件：<local-path>
+宏：macro_create_vhcu_folder
+更新后 steps（op 序列）：
+  key(win+e) → wait 1500 → key(ctrl+l) → wait 300 → type("<local-path>") →
+  key(enter) → wait 800 → key(ctrl+shift+n) → wait 600 →
+  type("VHCU_Learned") → key(enter) → wait 500
+category=explorer
+description=纯键盘：Win+E → Ctrl+L → <local-path> → 回车 → Ctrl+Shift+N → 输入名字 → 回车（无鼠标坐标）
+验证：node 读取 macros.json，确认无 click 步骤、category=explorer；
+      open_notepad_and_type / save_file 已补 category=global。
+说明：该文件为外部用户数据，本次直接原位更新，未另建 .bak（按需求直接替换）。
+
+====================================================================
+4. 测试
+====================================================================
+Node 37/37（contract10 / supervisor9 / integration2 / plugin9 / client3 / macros4）
+  - macros.test 新增：旧文件无 category → 自动 global 并回写；add category=explorer；
+    update steps/description 后重新加载仍正确、enabled 保留。
+  - plugin.test：/vhcu/macros update（category=explorer、steps 替换）→ GET 生效；
+    delete 后列表移除；vhcu_save_macro 带 category=explorer 断言；
+    P9 旧用例仍通过（save/run/禁用 E_DENIED）。
+Python 41/41（未改执行器，回归通过）。
+
+====================================================================
+5. 重启验证
+====================================================================
+5.1 重启
+  完全退出 DSH（确认 Electron/python.exe 无残留）→ 重开 → 新会话。
+  日志：
+    dsh-vhcu: mounted (routes /vhcu/state|events|control|frame|settings|macros)
+    dsh-vhcu: registered 13 tools
+5.2 宏 UI 验收
+  1) VHCU → ⚙：应看到 `▼ global (2)` 与 `▼ explorer (1)`；
+  2) 点组头可折叠/展开；
+  3) 点 macro_create_vhcu_folder → 详情中 steps 为纯键盘（无 click），
+     分类 explorer；
+  4) 修改描述/步骤 → 保存修改 → 重新打开确认；
+  5) 新建宏时填分类 demo → 出现 demo (1) 组；
+  6) 删除一个测试宏 → 列表消失；重启后不再出现；
+  7) 重启 DSH 后编辑内容与自定义宏仍在（macros.json 持久化）。
+5.3 键盘宏验收
+  先 vhcu_start_vision，然后：
+    vhcu_run_macro("macro_create_vhcu_folder")
+  预期：Win+E 打开资源管理器 → Ctrl+L 地址栏 → <local-path> → Ctrl+Shift+N →
+  输入 VHCU_Learned → 回车；返回 elapsed_ms/steps/frame_url。
+  若资源管理器启动慢，可把首个 wait 调大（详情面板直接改 JSON 保存）。
+5.4 失败排查
+  - 详情保存报 JSON 无效：检查 steps 文本（必须数组，op 在白名单）；
+  - E_CONFLICT：新建时重名；
+  - E_NOT_FOUND：编辑/删除的宏已被移除；
+  - E_DENIED：宏被禁用；
+  - 400/E_PROTO：category 超 40 字符、steps 非法。
+
+====================================================================
+6. 文件改动
+====================================================================
+【新增】
+  VHCU-P10-01-宏UI编辑与分类-20261101-0929.txt（本报告）
+【修改】（覆盖前已改名 .bak）
+  lib/client.js                宏行点击 → 详情编辑（steps JSON）、保存/删除、
+                               分类分组折叠、新建分类输入
+  lib/index.js                 /vhcu/macros update 分支；vhcu_save_macro category 参数
+  host/lib/macros.js           category 规范化/迁移/更新（update）、种子分类
+  host/test/macros.test.mjs    category/迁移/update 用例
+  host/test/plugin.test.mjs    update/delete API、带 category 的 save 断言
+  package.json / dsh.plugin.json  0.10.0
+  README.md                    P10 宏编辑/分组/键盘宏说明
+【外部数据修改】
+  <local-path>
+    - macro_create_vhcu_folder：steps 键盘化、category=explorer、描述更新
+    - 其它宏补 category=global
+【未改】
+  vision/*、contract/*、install.mjs
+
+备份：lib/index.js.bak、lib/client.js.bak、host/lib/macros.js（P9 新增无旧版）、
+      package.json.bak、dsh.plugin.json.bak、README.md.bak 等。
+
+====================================================================
+7. 已知边界与下一步
+====================================================================
+R1. 宏名不可在详情里改（需删除重建），避免引用失效。
+R2. 绝对坐标宏仍可能因分辨率/布局漂移；键盘宏更稳，建议新宏优先键盘流。
+R3. 分组只有折叠，没有拖拽排序/重命名分类。
+R4. 真实 macros.json 直接更新，未保留旧版备份；旧步骤可从 P9 报告/对话回溯。
+R5. 仍只支持主屏；设置（debug/IME）不持久化。
+
+P11 建议：
+  N1. 宏录制模式（自动生成 steps 草稿）；
+  N2. 分类重命名/排序、宏导入导出；
+  N3. 等待条件步骤（wait_for_window）与失败重试；
+  N4. 相对坐标/窗口标题锚定；
+  N5. 多屏与 DPI 适配。
+
+（报告完）

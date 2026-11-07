@@ -1,0 +1,191 @@
+DSH-VHCU  P6-01  全屏快照 + 滚轮/拖拽 + 强制回读（慢车道守护）交付报告
+生成时间：2026-10-31 21:09 (Asia/Shanghai)
+阶段：P6（消除 1fps 差分盲区，补齐常用宏，动作后强制回读）
+前置：P5 真实闭环已跑通（记事本打开/输入成功）；本轮按惯例先备份再改
+
+====================================================================
+0. 结论（先看这 7 条）
+====================================================================
+C1. 新增 vhcu_get_full_frame：调用即让 Python 立刻抓一帧**当前全屏**（不等待 1fps
+    差分 tick），返回签名 frame_url + Markdown 图片；专门解决新窗口/弹窗瞬间弹出
+    差分没抓到的盲区。
+C2. 新增 vhcu_mouse_scroll(amount) 与 vhcu_mouse_drag(x1,y1,x2,y2)：Python SendInput
+    实现滚轮（±20 格）与 12 步插值拖拽；工具总数 6 → 9。
+C3. 强制回读：任何 click/type/key/scroll/drag 成功后 Node 进入 pending 状态；下一次
+    输入动作前若没有调用 vhcu_get_vision_events 或 vhcu_get_full_frame，直接 E_STATE。
+    描述里写死“500ms 内回读，否则下一次动作被拒”。
+C4. 协议扩容：OPS/cmd schema 增加 vision.capture、input.scroll、input.drag；
+    Runner.capture_now 用独立 snapshot source 抓帧并发布为 latest，/vhcu/frame 立即可取。
+C5. 测试：Node 30/30、Python 31/31。新增用例覆盖：全屏签名 PNG 真取回、Markdown
+    ![全屏截图]、scroll/drag dry-run、未回读时 E_STATE、回读后解锁、amount=0 → E_PROTO。
+C6. 生效仍需完全重启 DSH；日志应出现 registered 9 tools。
+C7. 用户指定的验收链路（记事本→打字→滚轮→全屏截图）已写入第 5 节，可直接照抄。
+
+====================================================================
+1. 全屏快照（消除盲区）
+====================================================================
+1.1 Python：Runner.capture_now()
+  - 新增 self._snapshot_source：懒创建、独立于差分线程的 source（mss/fake）。
+  - 抓一帧（不受 1fps 限制），写入 self._latest，返回
+    {width,height,captureMs,capturedAt}。
+  - /vhcu/frame 仍从 latest 取图，因此全屏快照立即可以被签名 URL 拉取。
+  - daemon 新命令：vision.capture（无参数）→ 返回上述元数据。
+1.2 Node：vhcu_get_full_frame(max_width?)
+  - 要求视觉 running / supervisor ready，否则 E_STATE；
+  - 发送 vision.capture（8s 超时），按返回的宽高生成整屏签名 URL：
+    /vhcu/frame?x=0&y=0&w=<W>&h=<H>&maxw=<max_width>&exp=..&sig=..
+  - 默认 maxw=1600（可 320..1920），返回：
+    {ok, kind:'full_frame', width, height, max_width, capture_ms, frame_url, message}
+  - render 自动追加 Markdown：`![全屏截图](frame_url)`。
+  - 调用即清除 pending 回读状态（它本身就是回读）。
+
+====================================================================
+2. 新宏：滚轮 / 拖拽
+====================================================================
+2.1 Python input.py
+  - scroll(amount)：
+      int，0 → E_PROTO，|amount|>20 → E_PROTO；
+      SendInput MOUSEEVENTF_WHEEL，mouseData = amount*120（WHEEL_DELTA）。
+  - drag(x1,y1,x2,y2)：
+      两端点 normalize_click 校验主屏边界；
+      MOVE(start) → LEFTDOWN(start) → 12 步插值 MOVE → LEFTUP(end)；
+      try/finally 保证按键一定释放。
+  - 两者同样走 _rate_limit + _failsafe + dry-run。
+2.2 Node 工具
+  - vhcu_mouse_scroll(amount)：-20..20，正上负下；amount=0 在 Node 侧直接 E_PROTO。
+  - vhcu_mouse_drag(x1,y1,x2,y2)：物理像素；拖拽后回读提示。
+  - 返回体含 action/from/to/amount、dry_run、verify:{tool,after_ms:300}。
+
+====================================================================
+3. 强制回读（慢车道守护）
+====================================================================
+3.1 状态机
+  - let pendingVerify = null;
+  - 每个输入动作成功后 markActionPending(op) → {action, at}；
+  - runInputAction 入口顺序：视觉检查 → requireReadback() → 限流 → 发送；
+  - 未回读时抛 E_STATE：
+      “上次动作（input.click）尚未回读确认：请先调用 vhcu_get_vision_events
+       或 vhcu_get_full_frame”
+  - vhcu_get_vision_events / vhcu_get_full_frame 成功即 markReadback()；
+  - start/stop 也会清空 pending（重新开局不阻塞）。
+3.2 描述
+  五个输入工具 Description 都追加同一句：
+  「每次执行 click/type/scroll/drag 后，必须在 500ms 内调用 vhcu_get_vision_events
+    或 vhcu_get_full_frame 确认结果；如果没有确认，下一次动作将被拒绝（E_STATE）。」
+3.3 为什么这样设计
+  模型单步延迟远大于 500ms，真正可执行的是“动作后立刻回读、否则下一步被拒”；
+  500ms 是回读前的等待建议（返回值 after_ms=300/400 与之一致），不是硬计时器。
+
+====================================================================
+4. 测试与验证
+====================================================================
+4.1 Node 30/30（contract 10 / supervisor 9 / integration 2 / plugin 6 / client 3）
+  P6 用例：
+    - 未启动视觉时 vhcu_get_full_frame → E_STATE；
+    - 启动后全屏帧 ok，width/height>0，frame_url 为绝对签名地址；
+    - fetch frame_url → 200 image/png，首字节 89 50；
+    - render 含 `![全屏截图](http://...)`；
+    - scroll(3) → ok dry_run；紧接着 drag → E_STATE（未回读）；
+    - get_events 后 drag → ok dry_run；
+    - scroll(0) → E_PROTO。
+  P5 用例更新：click 后直接 type → E_STATE；get_events 解锁后 type ok；
+    full_frame 也可解锁；限流/键位/越界/超长仍覆盖。
+4.2 Python 31/31（新增 scroll/drag dry-run 与非法参数）
+4.3 dev harness：registered 9 tools；/vhcu/state idle 200。
+4.4 安装位置：junction apply → tools 9。
+4.5 未自动化：真实 SendInput 的 scroll/drag（避免动桌面），需人工验收。
+
+====================================================================
+5. 重启与验收（用户指定测试）
+====================================================================
+5.1 重启
+  ① 完全退出 DSH（托盘退出 / 任务管理器确认 Electron 进程结束）；
+  ② 重新打开 DSH；新开会话；
+  ③ 日志确认：dsh-vhcu: registered 9 tools。
+5.2 测试指令（直接发给模型）
+  「用 vhcu_start_vision 开视觉；用 vhcu_get_full_frame 看清桌面，找到记事本图标并
+    用 vhcu_mouse_click 打开；用 vhcu_type_text 输入“VHCU P6 测试”；用
+    vhcu_mouse_scroll(3) 向上滚动；最后用 vhcu_get_full_frame 截全屏给我确认；
+    结束调用 vhcu_stop_vision。」
+  关键约束（模型必须遵守）：
+    - 每次 click/type/scroll/drag 之后，先 get_vision_events 或 get_full_frame 回读；
+    - 不回读就做下一个动作会被 E_STATE 拒绝。
+5.3 失败排查
+  - E_STATE “视觉未运行”：先 start_vision。
+  - E_STATE “尚未回读确认”：调用 get_vision_events / get_full_frame 后重试。
+  - E_DENIED：鼠标在屏幕四角（人工急停），移开。
+  - E_PROTO：amount=0/越界、拖拽坐标越界、键名不支持。
+  - E_BUSY：限流（Node 8/10s + Python 12/5s）。
+  - 全屏图 409：视觉已停止，daemon 退出；重新 start。
+
+====================================================================
+6. 文件改动
+====================================================================
+【新增】
+  VHCU-P6-01-全屏快照与滚轮拖拽-20261031-2109.txt（本报告）
+【修改】（覆盖前已改名 .bak，只留最近一份）
+  lib/index.js                        + full_frame 工具；+ scroll/drag；+ pending 回读状态机；
+                                      + frameUrl maxWidth；+ 全屏 Markdown render
+  vision/vhcu_daemon/runner.py        + capture_now()/_snapshot_source
+  vision/vhcu_daemon/input.py         + MOUSEEVENTF_WHEEL、scroll、drag、mouse_data
+  vision/vhcu_daemon/cli.py           + vision.capture / input.scroll / input.drag 分发
+  vision/tests/test_input.py          + scroll/drag dry-run 与非法参数
+  contract/lib/contract.js            + vision.capture/input.scroll/input.drag
+  contract/schema/v1/cmd.json         op enum 同步
+  host/test/plugin.test.mjs           工具数 6→9；P6 全屏/滚轮/拖拽/回读用例
+  package.json / dsh.plugin.json      version 0.6.0
+  README.md                           P6 说明、9 工具、强制回读、验收
+【未改】
+  lib/client.js、vision/diff.py、vision/sources.py、cordis.patch.yml、scripts/install.mjs
+【工作区外】
+  profile junction 保持挂载，无需改动。
+
+备份：lib/index.js.bak / runner.py.bak / input.py.bak / cli.py.bak / test_input.py.bak /
+      contract.js.bak / cmd.json.bak / plugin.test.mjs.bak / package.json.bak /
+      dsh.plugin.json.bak / README.md.bak。
+
+====================================================================
+7. 已知边界与下一步
+====================================================================
+R1. 全屏快照需要视觉守护运行；stop 后 daemon 退出，无法再抓（符合“按需唤醒”）。
+R2. 仍只支持主屏；多屏/混合 DPI 留 P7。
+R3. 强制回读是“下一次动作前检查”，不是 500ms 定时器；这是对模型延迟的现实折中。
+R4. 真实 scroll/drag 未自动化（避免动桌面），需按第 5 节人工验收。
+R5. Markdown 图片是否被 DSH 渲染/送入模型仍取决于客户端；P7 可改 image content block。
+R6. 拖拽固定 12 步；特殊应用（Blender 等）可后续加 steps 参数。
+
+P7 建议：
+  N1. 按第 5 节跑一次真实链路，确认全屏图能替代官方截图兜底。
+  N2. image content block（attachments）让模型直接看到全屏/ROI 像素。
+  N3. 多屏与每屏 DPI；panic 热键。
+  N4. 宏（保存/复制/粘贴）与步骤编排。
+
+====================================================================
+附录 A：本轮聊天窗口回复原文（归档）
+追加时间：2026-10-31 21:09
+====================================================================
+P6 完成：新增全屏快照 + 滚轮 + 拖拽，共 9 个工具，并加入强制回读。
+
+- vhcu_get_full_frame：调用即抓当前全屏（不等 1fps），返回签名 frame_url 与
+  Markdown 图片；解决新窗口瞬间弹出差分抓不到的盲区。
+- vhcu_mouse_scroll(amount)：正上负下，±20 格；vhcu_mouse_drag(x1,y1,x2,y2)：
+  12 步插值拖拽。
+- 强制回读：click/type/key/scroll/drag 后未调用 get_vision_events 或
+  get_full_frame，下一次动作直接 E_STATE；描述里已写明。
+- 测试：Node 30/30、Python 31/31；自动化仍全部 dry-run，不碰真实桌面。
+- 重启：完全退出 DSH → 重开 → 新会话；日志 registered 9 tools。
+- 验收：start → full_frame 找记事本 → click → type → scroll → full_frame 确认 → stop。
+
+【新增】VHCU-P6-01-全屏快照与滚轮拖拽-20261031-2109.txt
+【修改】lib/index.js(.bak) / runner.py(.bak) / input.py(.bak) / cli.py(.bak) /
+        test_input.py(.bak) / contract.js(.bak) / cmd.json(.bak) /
+        plugin.test.mjs(.bak) / package.json(.bak) / dsh.plugin.json(.bak) / README.md(.bak)
+
+====================================================================
+附录 B：本轮记忆写入
+====================================================================
+memory_submit：P6 九工具、全屏快照 vision.capture 机制、scroll/drag 参数与实现、
+强制回读状态机（pending → E_STATE，读事件/全屏可解锁）、测试 30+31、重启验收指令、
+主屏/真实注入未自动化的边界。
+
+（报告完）

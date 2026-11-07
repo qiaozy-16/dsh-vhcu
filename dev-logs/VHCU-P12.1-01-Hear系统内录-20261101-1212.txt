@@ -1,0 +1,190 @@
+DSH-VHCU  P12.1-01  Hear 系统内录（Loopback + VAD + whisper）
+生成时间：2026-11-01 12:12 (Asia/Shanghai)
+阶段：P12.1（Hear 基础骨架：只听系统播放，不做麦克风/对讲/TTS）
+前置：P11.10 视觉/动作收尾完成
+
+====================================================================
+0. 结论（先看这 7 条）
+====================================================================
+C1. 新增 Hear 三工具：vhcu_start_hear / vhcu_stop_hear / vhcu_get_hear_events；
+    工具总数 13 → 16。
+C2. 音频源为 Windows WASAPI Loopback（soundcard），不打开麦克风；
+    不做语音对讲、不做 TTS。
+C3. 独立线程 vhcu-hear：30ms 帧 → webrtcvad(2) → 静音≥0.8s 且语音≥0.3s 切片
+    → faster-whisper base / cpu / int8 → hear.text 事件。
+C4. 模型路径：VHCU_MODEL_PATH 优先；否则插件目录下 models/：
+    <local-path>
+    WhisperModel(..., download_root=<该目录>)，绝不默认写 ~/.cache。
+C5. 依赖 try-import：缺 soundcard/webrtcvad/faster-whisper 时
+    vhcu_start_hear 返回 E_UNAVAILABLE + pip hint，不崩溃。
+C6. 数据契约 {id,ts,kind:'hear',text,...} 直接进入侧边栏 [H] Hear；
+    hear.status 只更新状态，不混入文本事件。
+C7. 测试：Node 44/44、Python 52/52。
+    ⚠️ 真实音频链路/模型下载未在本机验证（依赖尚未安装，如实记录）。
+
+====================================================================
+1. 依赖安装（需要用户执行）
+====================================================================
+  py -3 -m pip install soundcard webrtcvad-wheels faster-whisper
+
+  说明：
+    soundcard           WASAPI Loopback 采集（Windows）
+    webrtcvad-wheels    VAD 的预编译 wheel（import 名仍为 webrtcvad；
+                        直接用 webrtcvad 源码包可能因编译失败）
+    faster-whisper      本地识别（带 ctranslate2）
+  缺库时工具返回：
+    E_UNAVAILABLE / "Hear 依赖缺失：..." / hint=pip install soundcard webrtcvad-wheels faster-whisper
+
+====================================================================
+2. 模型路径（硬性要求）
+====================================================================
+  default_model_dir():
+    - VHCU_MODEL_PATH 存在 → expanduser().resolve()
+    - 否则 Path(hear.py).parents[2]/models
+      = <plugin root>/models
+      = <local-path>
+  WhisperModel(
+    "base", device="cpu", compute_type="int8",
+    download_root=str(model_dir)
+  )
+  - 启动前 mkdir(parents=True, exist_ok=True)；
+  - 首次联网下载 base 到该目录，之后离线；
+  - 不使用任何 ~/.cache 默认路径。
+
+====================================================================
+3. 架构与实现
+====================================================================
+3.1 文件
+  vision/vhcu_daemon/hear.py（新增）
+    HearError / default_model_dir / _import_dependencies / _open_loopback /
+    _to_int16 / HearService(start|stop|status|_run|_capture_loop|_flush_segment)
+  vision/vhcu_daemon/cli.py
+    - HearService 注入 Protocol.event
+    - capabilities.hear 状态
+    - ops: hear.start / hear.stop / hear.status
+    - shutdown() 先 hear.stop() 再停 vision
+  contract OPS/schema + hear.start/stop/status
+3.2 线程与生命周期
+  start():
+    - 同步 try-import 三依赖（缺失立即 E_UNAVAILABLE）；
+    - 设置 starting，启动 daemon 线程 vhcu-hear，立即返回 status；
+    - 线程内加载模型：status loading → listening；失败 status error。
+  stop():
+    - stop event → join(8s) → 释放 model/deps → gc.collect()
+    - 幂等；线程未启动也返回 idle。
+  shutdown(): 守护进程退出前 stop hear，避免线程/模型泄漏。
+3.3 采集/VAD
+  - samplerate 16000，mono，30ms=480 samples=960B；
+  - soundcard 默认扬声器 loopback；候选匹配 isloopback/名称，失败 E_UNAVAILABLE；
+  - 0.3s 预录缓冲；语音帧累积；
+  - 静音 ≥0.8s 且语音 ≥0.3s → 切片转写；不足 0.3s 丢弃；
+  - 停止时 flush 最后一段。
+3.4 转写
+  model.transcribe(audio_float32, beam_size=1,
+                   vad_filter=False, condition_on_previous_text=False)
+  拼接 segments.text.strip()；空文本不产生事件。
+  hear.text 字段：
+    {text, ts(ms), durationMs, audioMs, language, languageProbability, model}
+  hear.status 字段：
+    {status, running, model, device, computeType, sampleRate, silenceSec,
+     modelPath, segments, startedAt, lastError}
+3.5 Node
+  - 监听 supervisor event：hear.text → note('hear', text, {ts,...})；
+    hear.status → state.hear，pushStatus（不产生 hear 文本事件）。
+  - vhcu_start_hear：要求守护进程已运行（先 start_vision），否则 E_STATE；
+    下发 hear.start，返回 model_path/state。
+  - vhcu_stop_hear：下发 hear.stop，state.hear 置 idle，幂等。
+  - vhcu_get_hear_events：ring 中 kind=hear，limit 1..50，since_id 分页；
+    render 输出时间+文本+耗时。
+3.6 UI
+  - [H] Hear 空态改为“调用 vhcu_start_hear 开始监听…”，
+    hear 事件沿用 HearRow（时间戳+文本）。
+
+====================================================================
+4. 测试
+====================================================================
+Node 44/44
+  - 16 工具注册（含 3 个 Hear）；
+  - Hear 工具描述含 WASAPI Loopback / VHCU_MODEL_PATH / E_UNAVAILABLE；
+  - 未启守护进程 start_hear → E_STATE；
+  - get_hear_events 空列表 + render 文本；
+  - stop_hear 幂等成功。
+Python 52/52（新增 tests/test_hear.py）
+  - VHCU_MODEL_PATH 生效；默认路径以 models 结尾且不含 .cache；
+  - float32 下混/限幅为 int16；
+  - 缺依赖 start() → E_UNAVAILABLE（hint 含 pip）；
+  - 初始 status（base/cpu/int8/idle）与 stop 幂等。
+未验证（如实记录）：
+  - 本机未安装 soundcard/webrtcvad/faster-whisper，真实 loopback 采集、
+    VAD 切片、模型下载/转写均未实跑；
+  - 需要用户安装依赖后按下一节验收。
+
+====================================================================
+5. 重启验证
+====================================================================
+5.1 安装依赖
+  py -3 -m pip install soundcard webrtcvad-wheels faster-whisper
+5.2 重启
+  完全退出 DSH（确认 Electron/python.exe 无残留）→ 重开 → 新会话。
+  日志：
+    dsh-vhcu: mounted (routes /vhcu/state|events|control|frame|settings|macros)
+    dsh-vhcu: registered 16 tools
+5.3 启动
+  1) vhcu_start_vision
+  2) vhcu_start_hear
+     - 返回 model_path 应为 <local-path>；
+     - 首次会下载 base（约 150MB），期间 hear.status=loading；
+     - 完成后 state=listening。
+5.4 转写
+  播放一段有解说/提示音的视频（系统外放，非耳机独占亦可），等 2-5 秒：
+    vhcu_get_hear_events → 应有 kind:"hear" 文本；
+    侧边栏 [H] Hear 应实时出现行。
+5.5 停止
+  vhcu_stop_hear → idle；再次 get 不应新增。
+5.6 缺依赖
+  在未装依赖环境 vhcu_start_hear → E_UNAVAILABLE + pip hint。
+5.7 模型位置检查
+  dir <local-path>
+  应出现 faster-whisper 的模型缓存目录；<local-path><user>\.cache 不应新增模型。
+
+====================================================================
+6. 文件改动
+====================================================================
+【新增】
+  vision/vhcu_daemon/hear.py          HearService/loopback/VAD/whisper
+  vision/tests/test_hear.py           Hear 单测
+  VHCU-P12.1-01-Hear系统内录-20261101-1212.txt（本报告）
+【修改】（覆盖前已改名 .bak）
+  lib/index.js                        hear 事件/状态、3 个 Hear 工具、16 工具
+  lib/client.js                       [H] Hear 空态文案
+  vision/vhcu_daemon/cli.py           HearService 注入、hear.* ops、shutdown
+  contract/lib/contract.js            OPS + hear.start/stop/status
+  contract/schema/v1/cmd.json         op enum
+  host/test/plugin.test.mjs           16 工具/Hear 用例
+  package.json / dsh.plugin.json      0.15.0
+  README.md                           P12.1 安装/路径/验收
+【未改】
+  runner.py、httpframe.py、input.py、宏库
+
+备份：lib/index.js.bak、lib/client.js.bak、cli.py.bak、contract.js.bak、
+      cmd.json.bak、plugin.test.mjs.bak、package.json.bak、
+      dsh.plugin.json.bak、README.md.bak。
+
+====================================================================
+7. 已知边界与下一步
+====================================================================
+R1. 仅 Windows WASAPI Loopback；Linux/macOS 未支持。
+R2. base 模型固定、CPU int8；首次加载/下载慢，转写按 0.8s 静音切片，非逐字流式。
+R3. Hear 复用视觉守护进程；未 start_vision 时 start_hear 返回 E_STATE。
+R4. 系统静音/无外放时没有事件。
+R5. 本机未实跑音频（依赖缺失）；真实采集与模型下载需安装后验收。
+R6. 资源占用：whisper base + ctranslate2 常驻内存；stop 时释放并 gc。
+
+P12.2 建议：
+  N1. Hear 状态/错误在 [H] 面板可视化（loading/error）；
+  N2. 转写语言固定/热词；
+  N3. 音频电平/设备选择；
+  N4. 事件去重与长句合并；
+  N5. 与视觉时间轴合并展示。
+
+（报告完）

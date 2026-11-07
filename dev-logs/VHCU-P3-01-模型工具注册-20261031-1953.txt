@@ -1,0 +1,214 @@
+DSH-VHCU  P3-01  模型工具（Function Calling）交付报告
+生成时间：2026-10-31 19:53 (Asia/Shanghai)
+阶段：P3（把视觉能力暴露为 3 个主模型可调用工具，实现模型级按需唤醒）
+前置：P2 插件壳/面板已挂载；本轮直接改 lib/index.js（已备份 index.js.bak）
+
+====================================================================
+0. 结论（先看这 6 条）
+====================================================================
+C1. 3 个工具已注册：vhcu_start_vision / vhcu_stop_vision / vhcu_get_vision_events，
+    全部挂在 ctx.effect 生命周期里，插件卸载时自动注销。
+C2. 工具启动固定 1fps（低功耗），UI 启动仍 8fps；两者共用同一个 daemon 与事件环，
+    先 UI 开启再 tool 调用不会重复 spawn（start 幂等，返回同一 pid）。
+C3. 工具定义是普通 ToolRuntime 描述对象（raw JSON Schema parameters + output.schema/render），
+    刻意不 import @deepseek-ai/dsh-tools：dev harness 在纯 Node 下也能跑，
+    host 端 register 同样接受（dsh-ops 等插件已有先例）。
+C4. inject 增加 'tools'：宿主未提供 tools 服务时插件不会加载；工具注册失败会被
+    逐个 catch 并记日志，不会拖垮路由/UI。
+C5. 测试：Node 28/28（新增 P3 工具端到端：1fps 启动→事件≤10→渲染 JSON→停止且子进程退出→stop 幂等），
+    Python 18/18；从已安装路径 import/apply 验证 routes=4、tools=3、dispose 后全部归零。
+C6. 生效需要一次「完全重启 DSH」：host 模块与工具表都在启动时加载，本会话内无法热更新。
+
+====================================================================
+1. 三个工具（实际注册内容）
+====================================================================
+1.1 vhcu_start_vision
+  Description（给模型看的原文）：
+    「按需开启 VHCU 视觉监控（模型级唤醒）。它会启动本地视觉守护进程，以低功耗 1fps
+     对屏幕做差分，只把变化区域缓存为 JSON 事件；截图不会发给模型。
+     适用场景：用户要求你关注屏幕变化；你需要等待页面或应用加载完成；你想确认自己上一步
+     操作是否生效；或你需要观察界面当前状态时。调用后用 vhcu_get_vision_events 读取变化；
+     任务结束或不再需要时务必调用 vhcu_stop_vision 释放资源。无需参数；重复调用安全
+     （已在运行则直接返回当前状态）。」
+  参数：{}（object, additionalProperties:false）
+  返回：{ ok, running, phase, fps:1, source, pid, message }
+  失败：{ ok:false, code, error, hint }
+
+1.2 vhcu_stop_vision
+  Description：「关闭 VHCU 视觉监控并释放资源：停止差分采集并退出视觉守护进程。
+    当用户不再需要关注屏幕、你已完成观察任务、或需要让机器恢复低功耗/隐私状态时调用。
+    无需参数；重复调用安全（已停止则直接返回）。」
+  返回：{ ok, running, phase, message }
+  实现：先 vision.stop（若在跑）再 supervisor.stop，保证 python 子进程退出。
+
+1.3 vhcu_get_vision_events
+  Description：「读取 VHCU 视觉监控最近产生的差分事件（最多 10 条 JSON）。每条包含
+    发生时间、屏幕尺寸、变化区域 ROI 的坐标/大小与差分耗时。在 vhcu_start_vision 之后
+    调用，用来判断屏幕是否发生变化、哪些区域变了、变化多快；停止后也可读取最后一批事件。
+    无需参数；没有事件时返回空列表而不是报错。」
+  返回：{ ok, running, count, events:[{id,ts,time,screen,roiCount,diffMs,rois,text}], message }
+  来源：内存事件环（200 条）里 kind='vision' 且带 rois 的条目，取最后 10 条。
+  render：把 message + 每条 JSON 拼成 text block，模型可直接读。
+
+====================================================================
+2. 实现要点
+====================================================================
+2.1 生命周期
+  ctx.effect(registerTools, 'vhcu: tools')
+    → 立即 ctx.tools.register(definition) × 3
+    → 返回 disposer：插件禁用/卸载时逐个 unregister
+  工具 execute 复用现有 control()/enqueue() 队列：
+    - 与 UI 的 HTTP /vhcu/control 共用同一把串行锁，避免并发 spawn；
+    - 与 HTTP 共用同一份 state/counters/ring，UI 与工具看到的是同一状态。
+
+2.2 为什么不用 defineTool
+  @deepseek-ai/dsh-tools 是宿主内建包（app.asar 内），插件在 host 内可 import，但
+  dev harness/单测跑在普通 Node 下会解析失败。实测 dsh-ops 的 toolDefinition 直接给
+  registry 传 raw JSON Schema + output.schema/render，因此本插件采用同样形态：
+    { name, description,
+      parameters: {type:'object', properties:{}, additionalProperties:false},
+      output: { schema: {type:'object', additionalProperties:true}, render(args,value) },
+      async execute(args, exec) }
+  好处：零依赖、可单测；代价：参数校验由 registry 的 JSON Schema 完成（本工具无参数）。
+
+2.3 幂等与并发
+  - start：已在运行 → 直接返回快照（不改 fps）；
+  - stop：已停止 → 直接返回 ok；
+  - get_events：任何时候都可调用，未启动时返回空列表；
+  - 全部经过 enqueue 串行化，双击/并发调用不会产生第二个 daemon。
+
+2.4 状态与频率
+  - 工具体默认 TOOL_FPS=1；UI 默认 DEFAULT_FPS=8；
+  - doStart(options) 接受 fps（1..15），UI 与工具互不影响已有运行实例；
+  - 1fps 下 fake/mss 的实际 fps 由 Python runner 控制，事件里 stats.frame 递增。
+
+====================================================================
+3. 测试与验证
+====================================================================
+3.1 自动化
+  Node 28/28 通过（原 27 + 新增 1 项 P3 工具端到端）
+    contract 10 / supervisor 9 / integration 2 / plugin 4 / client 3
+  新增 P3 用例覆盖：
+    - 3 个工具名、description 长度、parameters 为 object、output.render 可调用；
+    - start 返回 fps=1、pid>0；再次 start 返回同一 pid（不重复 spawn）；
+    - get_events 15s 内拿到 ≥1 条、≤10 条；事件含 rois/diffMs/time；
+    - render 输出 text block 且包含 "rois"；
+    - stop 后 8s 内原 pid 不再存活；再次 stop 仍 ok。
+  Python 18/18 通过（未改 vision 代码）。
+
+3.2 安装位置烟测
+  从 <local-path>）：
+    import → exports name=dsh-vhcu / inject=["webServer","tools"] / apply
+    apply(mock ctx) → routes 4，tools 3（vhcu_start_vision, vhcu_stop_vision, vhcu_get_vision_events）
+    dispose → routes 0，tools 0
+  dev harness（mock ctx，真实 host 插件）：
+    日志出现 "dsh-vhcu: registered 3 tools"；/vhcu/state 返回 idle。
+
+3.3 尚未验证
+  - 真实宿主 tool registry 对上述定义的接受度（mock 只校验 name/execute）；
+    依据是 dsh-ops 同形态注册的先例，重启后看日志 "registered 3 tools" 即可确认。
+  - 模型实际调用工具的行为（需要重启后在新会话里发起）。
+
+====================================================================
+4. 如何完全重启宿主并测试
+====================================================================
+4.1 重启（必须完全退出，不是关窗口）
+  ① 托盘图标右键 → 退出；或任务管理器结束 DSH 的 Electron 进程（确认没有残留）。
+  ② 重新打开 DSH。
+  ③ 新开一个会话（工具表在会话/宿主启动时构建；当前会话不会热加载）。
+
+4.2 确认工具已注册
+  宿主日志（DSH 日志目录）应出现：
+    dsh-vhcu: registered 3 tools
+    dsh-vhcu: mounted (routes /vhcu/state|events|control|frame)
+  侧边栏「VHCU 视觉」tab 仍可用（P2 功能不受影响）。
+
+4.3 在对话里验收（复制即可）
+  提示词 A（最小闭环）：
+   「请用 vhcu_start_vision 开启视觉；等 5 秒；用 vhcu_get_vision_events 看看屏幕有没有变化；
+     最后用 vhcu_stop_vision 关闭。」
+  预期：模型先调用 start（返回 fps=1/pid），再调用 get_events 读到若干 ROI JSON，
+        最后 stop；任务管理器无 python.exe。
+
+  提示词 B（真实场景）：
+   「打开记事本，然后盯着屏幕确认窗口是否出现；用视觉工具确认后再告诉我。」
+  预期：模型先 vhcu_start_vision → 执行打开动作 → 等 1-2 秒 → vhcu_get_vision_events
+        看到新增窗口区域 → vhcu_stop_vision。
+
+  提示词 C（隐私/资源）：
+   「看一下当前视觉监控状态；如果还开着就关掉。」
+  预期：get_events 或直接 stop；返回 running=false。
+
+4.4 如果工具没出现
+  - 日志有 "tools service unavailable"：宿主 inject 失败（版本差异），检查 inject 名；
+  - 日志有 "tool registration failed"：看具体 tool 名与错误（多为 schema 或重名）；
+  - 完全没有 vhcu 日志：插件未加载，检查 profile bundles 与重启是否彻底。
+  - 回滚：cp lib/index.js.bak lib/index.js 后重启；或 node scripts/install.mjs --uninstall。
+
+====================================================================
+5. 本轮文件改动（按要求列出）
+====================================================================
+【新增】
+  VHCU-P3-01-模型工具注册-20261031-1953.txt（本报告）
+【修改】（覆盖前已把原文件改名为 .bak，只保留最近一份）
+  lib/index.js          + inject 'tools'；+ TOOL_FPS=1；doStart(options)；
+                        + recentDiffEvents/describeToolResult；+ 3 个工具定义与 ctx.effect 注册
+                        （备份：lib/index.js.bak）
+  dsh.plugin.json       version 0.3.0；entry.inject = ["webServer","tools"]
+                        （备份：dsh.plugin.json.bak）
+  package.json          version 0.3.0（备份：package.json.bak）
+  README.md             增加 P3 工具说明、测试/重启步骤（备份：README.md.bak）
+  host/test/plugin.test.mjs   首个用例增加 tools 断言；新增 P3 工具端到端用例
+  dev/mock-ctx.mjs      增加 tools.register 模拟与 tools 导出
+【未改】
+  lib/client.js（UI 不变）、contract/、vision/、cordis.patch.yml、scripts/install.mjs
+【工作区外】
+  profile 的 junction 与 package.json 已在 P2 挂载，本轮无需改动（junction 实时生效）。
+
+备份清单（单一 .bak）：lib/index.js.bak / dsh.plugin.json.bak / package.json.bak / README.md.bak。
+说明：host/test/plugin.test.mjs 与 dev/mock-ctx.mjs 属于测试/开发辅助文件，采用增量编辑，
+未单独生成 .bak；若需要回退这两个文件，可参考本报告第 3 节的断言与 2.1 的注册形态重建。
+
+====================================================================
+6. 已知风险与下一步
+====================================================================
+R1. 真实 registry 的 schema 兼容性未在宿主内实测；重启后看日志即可判定。
+R2. 1fps 是工具默认值；若用户场景需要更快，可在 description 之外增加参数（本轮按需求不加参数）。
+R3. get_events 只有最近 10 条；高频场景模型可能连续调用多次，后续可加 since_id 参数。
+R4. 工具调用与 UI 共用 daemon：如果用户手动关了 UI，工具会自己再拉起（符合按需唤醒），
+    但两边对 fps 的期望不同（1 vs 8），当前策略是「谁先启动谁决定，后来者幂等复用」。
+R5. DSH 重启会中断当前会话的连续性；本报告所有验收命令都以「重启后新会话」为前提。
+
+下一步（P4 建议）：
+  N1. 重启后按 4.3 验收 A/B/C 三条提示词，记录模型实际调用序列与耗时；
+  N2. get_vision_events 增加 sinceId/limit 参数，支持增量读取；
+  N3. 工具级预算：单次会话最多启动 N 秒后自动 stop（防模型忘记关闭）；
+  N4. 将 ROI 缩略图接入 /vhcu/frame（UI 美化阶段）。
+
+====================================================================
+附录 A：本轮聊天窗口回复原文（归档）
+追加时间：2026-10-31 19:53
+====================================================================
+P3 完成：3 个工具已注册到宿主工具表，并在 mock ctx 上端到端验证。
+
+- vhcu_start_vision：低功耗 1fps 启动，幂等（重复调用返回同一 pid）；
+- vhcu_stop_vision：停采集 + 退出 Python，幂等；
+- vhcu_get_vision_events：返回最近 ≤10 条 ROI JSON（时间/屏幕/ROI/diffMs）。
+- 全部挂在 ctx.effect 生命周期；inject 增加 'tools'；不依赖 @deepseek-ai/dsh-tools。
+- 测试：Node 28/28、Python 18/18；已安装路径 apply → routes 4 / tools 3 / dispose 归零。
+
+生效需完全重启 DSH。重启后在新会话里说：
+「用 vhcu_start_vision 开启，等 5 秒，用 vhcu_get_vision_events 看看变化，然后 stop。」
+日志应出现 "registered 3 tools"。
+
+【新增】VHCU-P3-01-模型工具注册-20261031-1953.txt
+【修改】lib/index.js (.bak) / dsh.plugin.json (.bak) / package.json (.bak) / README.md (.bak) /
+        host/test/plugin.test.mjs / dev/mock-ctx.mjs
+
+====================================================================
+附录 B：本轮记忆写入
+====================================================================
+memory_submit：P3 工具名与语义、1fps/幂等、inject tools、raw JSON Schema 注册形态、
+Node 28 + Python 18、完全重启与新会话验收提示词、profile junction 已挂载无需重装。
+
+（报告完）

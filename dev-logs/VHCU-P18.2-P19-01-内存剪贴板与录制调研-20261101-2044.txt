@@ -1,0 +1,136 @@
+DSH-VHCU  P18.2/P19-01  隔离内存剪贴板 + 宏录制监听调研
+生成时间：2026-11-01 20:44 (Asia/Shanghai)
+阶段：P18.2（隔离内存剪贴板）+ P19 预研（不写录制业务）
+范围：Node 工具新增；不修改 Windows 系统剪贴板；不新增录制依赖。
+
+====================================================================
+1. 时间 / 阶段 / 范围
+====================================================================
+  时间：2026-11-01 20:44 +08:00
+  阶段：P18.2 + P19 预研
+  范围：
+    - lib/index.js：内存剪贴板变量与两个工具；
+    - 工具数 19 → 21；
+    - 不调用 OpenClipboard/系统剪贴板 API；
+    - 不安装 uiohook-napi / node-global-key-listener / ffi-napi；
+    - 仅输出调研报告。
+
+====================================================================
+2. 本轮交付物
+====================================================================
+2.1 隔离内存剪贴板
+    变量：
+      const MEMORY_CLIPBOARD_MAX = 5000;
+      let memoryClipboard = '';
+    工具：
+      vhcu_set_memory_clipboard(text)
+        - text 超过 5000 字 → E_PROTO，不截断、不写系统剪贴板；
+        - 成功：{ok, text, length, max_length:5000, isolated:true}
+        - Action 日志：📋 写入内存剪贴板 (N 字)
+      vhcu_get_memory_clipboard()
+        - 返回 {ok, text, length, empty, isolated:true}
+        - 空时 text=''、empty=true
+        - Action 日志：📋 读取内存剪贴板 (N 字)
+    隔离：
+      - 纯 Node 字符串，无 clipboard 模块、无 child_process 调 PowerShell、
+        无 OpenClipboard/GetClipboardData/SetClipboardData；
+      - DSH 重启即清空，不落盘；
+      - UI/SSE 的 action 事件只含字符数，不含正文。
+    工具数：
+      19 → 21（视觉/键鼠/宏 16 + Hear 3 + 内存剪贴板 2）。
+
+2.2 P19 调研报告
+    文件：VHCU-P19-01-宏录制底层监听技术调研.md
+    内容：
+      - 需求/约束/安全底线；
+      - uiohook-napi：N-API、键盘+鼠标+滚轮、MIT、prebuilt
+        win32-x64 约 174KB 级、无需 node-gyp；风险为原生二进制/AV/
+        低层钩子超时/窗口上下文需另查；
+      - node-global-key-listener：仅键盘、外部二进制、0.3.0 旧包、
+        ReversingLabs 标记历史恶意事件/供应链风险；不推荐；
+      - ffi-napi + SetWindowsHookEx：需 Windows 消息循环、
+        FFI 回调/线程/ABI 风险、维护性差；不推荐；
+      - 自研 N-API 插件：最可控，推荐 V1.0 生产；
+      - Raw Input (RIDEV_INPUTSINK)：备选，需原生窗口/消息循环，
+        原始 HID 映射成本高；
+      - Electron globalShortcut/页面监听/PowerShell/GetAsyncKeyState
+        不适用；
+      - AV/供应链/签名/打包 asar unpack/钩子生命周期；
+      - POC 验收指标与推荐路线。
+
+====================================================================
+3. 证据
+====================================================================
+3.1 实读源码
+    lib/index.js：
+      MEMORY_CLIPBOARD_MAX=5000、memoryClipboard=''；
+      note('action', '📋 写入/读取内存剪贴板...')；
+      tools 注册两个新工具；
+      grep 仅发现工具名/注释/Description，无 OpenClipboard 等 API。
+    host/test/plugin.test.mjs：
+      工具列表与数量更新到 21；
+      新增隔离剪贴板测试：写入/读取/超长拒绝/清空/SSE Action 日志。
+3.2 实测
+    Node 72/72 通过；
+    Python 88/88 通过；
+    clipboard 测试覆盖：
+      - 写入“内存中的秘密 123”，长度正确、isolated=true；
+      - 读取一致；
+      - 5001 字 → E_PROTO，原内容不变；
+      - 清空后 empty=true；
+      - SSE 出现 action：📋 写入内存剪贴板。
+3.3 外部资料（只作调研依据，非本机实测）
+    npm uiohook-napi 页面：
+      https://www.npmjs.com/package/uiohook-napi
+    unpkg prebuild 体积：
+      https://app.unpkg.com/@mukea/uiohook-napi@2.0.1/files/prebuilds
+    npm node-global-key-listener：
+      https://www.npmjs.com/package/node-global-key-listener
+    ReversingLabs SAFE 扫描：
+      https://secure.software/npm/packages/node-global-key-listener/0.3.0
+    Microsoft SetWindowsHookEx：
+      https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setwindowshookexw
+3.4 未实测
+    - uiohook-napi 在本项目 Electron 打包环境中的加载；
+    - Defender/国产杀软扫描结果；
+    - 真实键鼠事件延迟/CPU/DPI；
+    - ffi-napi/N-API 原生构建；
+    - 录制隐私策略的可用性。
+
+====================================================================
+4. 风险与未验证项
+====================================================================
+R1. 内存剪贴板是明文进程内存；DSH 进程被调试/倾倒时可见。
+R2. get 工具会把全文返回给模型；不要用内存剪贴板传递密码/密钥。
+R3. 5000 字按 JS string.length（UTF-16 code unit）计算；
+    emoji 可能占 2，达到上限时可能比“5000 个用户可见字符”少。
+R4. Action 日志只记字符数，不记正文；但工具返回值含正文，
+    模型上下文仍会包含，需谨慎。
+R5. P19 调研基于公开资料与推断，未在本机安装 uiohook-napi 验证；
+    其体积/API/兼容性以 POC 实测为准。
+R6. node-global-key-listener 的恶意事件是第三方扫描历史记录，
+    不代表当前版本一定恶意，但足以作为不引入理由。
+R7. 全局键盘钩子天然具备 keylogger 行为，可能触发 AV/EDR；
+    录制功能上线前必须做显式提示、暂停、隐私窗口过滤、预览后保存。
+
+====================================================================
+5. 待确认决策（编号）
+====================================================================
+D1. 内存剪贴板上限 5000 字；超限拒绝而非截断（避免静默丢数据）。
+D2. 内存剪贴板不持久化，DSH 重启清空。
+D3. 剪贴板工具只返回纯文本，不做富文本/图片。
+D4. P19 POC 选 uiohook-napi；V1.0 生产建议自研 N-API 插件。
+D5. 不引入 node-global-key-listener；不用 ffi-napi 做钩子。
+D6. 录制功能必须显式开始、可见、可停、默认不自动执行。
+
+====================================================================
+6. 下一步计划
+====================================================================
+N1. 重启 DSH，验证 21 个工具及 [A] 面板的 📋 日志。
+N2. 用 vhcu_set/get_memory_clipboard 做 5000 字边界与清空回归。
+N3. 在独立实验分支做 uiohook-napi POC：
+    只打印事件，不写录制业务；验证打包/AV/DPI/延迟。
+N4. POC 通过后再设计录制事件模型与宏生成器；
+    失败则转自研 N-API 或 Raw Input。
+
+（报告完）

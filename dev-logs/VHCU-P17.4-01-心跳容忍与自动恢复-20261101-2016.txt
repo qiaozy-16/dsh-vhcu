@@ -1,0 +1,127 @@
+DSH-VHCU  P17.4-01  心跳容忍放宽 + 自动恢复
+生成时间：2026-11-01 20:16 (Asia/Shanghai)
+阶段：P17.4（心跳误伤修复）
+范围：Node supervisor 心跳阈值；Node 守护进程自动恢复编排；UI 恢复中状态。
+        不改 Python 守护进程代码。
+
+====================================================================
+1. 时间 / 阶段 / 范围
+====================================================================
+  时间：2026-11-01 20:16 +08:00
+  阶段：P17.4
+  问题：UI 报错 no heartbeat for 4215ms (limit 3000ms)，
+        视觉 + 模型思考时 Python 短暂无心跳即被判死。
+  范围：
+    - contract/lib/contract.js：HEARTBEAT_MISS_LIMIT；
+    - lib/index.js：heartbeatRecovery 自动恢复；
+    - lib/client.js：recovering 阶段文案/按钮；
+    - 测试：contract/supervisor/client。
+
+====================================================================
+2. 本轮交付物
+====================================================================
+2.1 放宽阈值
+    旧：
+      HEARTBEAT_MS = 1000
+      HEARTBEAT_MISS_LIMIT = 3
+      → 3000ms 判死
+    新：
+      HEARTBEAT_MS = 1000
+      HEARTBEAT_MISS_LIMIT = 10
+      → 10000ms 判死
+    说明：用户要求 10-15 秒；取 10 秒，给模型思考/视觉处理留余量。
+
+2.2 自动恢复
+    Node attachSupervisor 新增 heartbeatRecovery：
+      failure(kind="heartbeat-lost")
+      且当前处于 running 或 Hear 正在运行
+      → 记录 {wasVision, wasHear, source, fps}
+      → state.phase="recovering"、running=false、daemonRunning=false
+      → note "心跳超时，后台自动重启一次守护进程…"
+      → 不立即亮红灯。
+    随后 supervisor 自身按既有逻辑 kill 旧 child + 退避重启。
+    supervisor ready 事件：
+      → 若 heartbeatRecovery 存在，调用 recoverAfterHeartbeat：
+          1. 原本在视觉 → 重发 vision.start（source/fps/privacy）
+          2. 原本在 Hear → 重发 hear.start
+          3. 成功：phase=running（或 Hear-only 为 idle）、
+             running=wasVision、daemonRunning=true、
+             pid/port/source/fps 恢复、lastError=null、
+             note "心跳超时后守护进程已自动重启，视觉/听觉已恢复"
+          4. 失败：phase=error、note 自动恢复失败 → 红灯。
+    二次失败：
+      heartbeatRecovery 存在期间再次收到 failure
+      → 立即 phase=error、红灯、note "心跳恢复失败（二次异常）"。
+    breaker 事件：
+      → phase=error、红灯、note "守护进程熔断"。
+    手动 doStop/doStart：
+      → 清空 heartbeatRecovery，避免旧恢复覆盖新会话。
+2.3 UI
+    PHASE_TEXT 增加 recovering: "恢复中"；
+    普通「开启视觉」按钮在 recovering 时 disabled；
+    紧急制动仍可用。
+2.4 行为边界
+    - 恢复只做一次：第一次心跳超时自动重启 + 恢复；
+    - 恢复期间第二次 failure/启动失败/breaker → 红灯；
+    - 恢复会保留原始 source/fps/privacy 设置；
+    - Hear-only 场景也会尝试恢复 Hear。
+
+====================================================================
+3. 证据
+====================================================================
+3.1 实读源码
+    contract/lib/contract.js：HEARTBEAT_MISS_LIMIT 改为 10；
+    host/lib/supervisor.js：_fail 已自动 kill + _scheduleRestart；
+                             ready 事件由 _onReady emit；
+    lib/index.js：attachSupervisor 新增 ready/breaker/failure 恢复逻辑；
+                  doStart/doStop 清空 heartbeatRecovery；
+                  recoverAfterHeartbeat 重发 vision.start/hear.start；
+    lib/client.js：PHASE_TEXT.recovering、按钮 disabled。
+3.2 实测
+    Node 71/71 通过；
+    Python 88/88 通过；
+    contract.test：HEARTBEAT_MS=1000、MISS_LIMIT=10 → 10000ms；
+    supervisor.test：no-heartbeat fixture 超时后自动 respawn（spawns>=2），
+                     未进入 circuit-open；
+    client.test：recovering 文案与禁用条件存在。
+3.3 未实测
+    - 真实视觉 + 模型思考导致 4-10 秒无心跳的现场恢复；
+    - 恢复后 vision.start 重新推流的端到端画面连续性；
+    - Hear-only 恢复的真实音频闭环。
+
+====================================================================
+4. 风险与未验证项
+====================================================================
+R1. 10 秒仍可能被极慢的视觉/模型处理超过；可按需再调 15 秒。
+R2. 恢复依赖 supervisor ready 事件；若 daemon 重启后一直不 READY，
+    会走 ready-timeout → 二次 failure → 红灯。
+R3. Node 自动恢复会重发 vision.start；原画面历史/差分计数不连续，
+    counters 不重置，可能保留旧帧计数。
+R4. 恢复期间 phase=recovering；普通启动按钮禁用，用户可等自动恢复
+    或点紧急制动。
+R5. supervisor 本身仍会在 breaker 窗口内多次重试；
+    Node 在第二次 failure 就红灯，后台可能仍在重启。
+R6. 未改 Python 心跳发送逻辑；若 Python 长时间阻塞不写心跳，
+    本次只靠放宽阈值与重启恢复。
+
+====================================================================
+5. 待确认决策（编号）
+====================================================================
+D1. 心跳阈值取 10 秒（不是 15）；如需更宽可改 MISS_LIMIT=15。
+D2. 自动恢复只做一次；第二次异常立即红灯，不无限重试。
+D3. 恢复时重发 vision.start（以及 wasHear 的 hear.start），
+    不尝试恢复历史事件/画面。
+D4. 恢复期间禁用普通启动按钮，避免用户与自动恢复竞争。
+
+====================================================================
+6. 下一步计划
+====================================================================
+N1. 完全重启 DSH 加载 10s 阈值。
+N2. 复现 P17.3 场景：视觉 + 模型思考持续 5-9 秒无心跳，
+    观察 UI 显示“恢复中”，随后自动回到“运行中”。
+N3. 人为制造连续失败（例如多次杀 daemon/断端口），
+    确认第二次异常后红灯。
+N4. 如仍误伤，将 HEARTBEAT_MISS_LIMIT 调到 15；
+    如恢复不完整，检查 vision.start 的 source/fps/privacy 参数。
+
+（报告完）

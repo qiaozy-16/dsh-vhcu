@@ -1,0 +1,171 @@
+DSH-VHCU  P16.7-01  听觉灵敏度热更新
+生成时间：2026-11-01 18:59 (Asia/Shanghai)
+阶段：P16.7（环境自适应：严格/标准/灵敏）
+前置：P16.6 多维度幻听判定完成
+
+====================================================================
+0. 结论（先看这 6 条）
+====================================================================
+C1. ⚙ 设置新增“听觉灵敏度”下拉：严格 / 标准 / 灵敏，默认标准。
+C2. 保存 settings 后，Node 若守护进程 ready，立即发送
+    hear.configure {level}；Python 更新配置，下一段音频生效。
+C3. 无需重启 DSH；Hear 运行中切换立即生效。
+C4. no_speech_threshold：严格 0.5、标准 0.6、灵敏 0.8。
+C5. 短句长度/保护长度/长句长度/高能量长度随档位变化。
+C6. 绝对黑名单仍无条件丢弃，不受档位影响。
+
+====================================================================
+1. 参数矩阵（hear.py SENSITIVITY）
+====================================================================
+  字段                        strict   normal   sensitive
+  no_speech_threshold          0.5      0.6       0.8
+  short_phrase_max_len          16       12        6
+  short_phrase_duration         4.0      3.0       2.0
+  protect_max_len               2        5         8
+  long_no_speech_len            8        10        14
+  high_energy_len               6        8         12
+
+  解释：
+    - 严格：概率门槛更低、更多文本进入长句/高能量判定，
+      短句保护只覆盖 1-2 字，更容易丢弃小声说话；
+    - 标准：P16.6 当前平衡逻辑；
+    - 灵敏：概率门槛更高、长句/高能量阈值更大，
+      短句保护扩到 1-8 字，尽量保留文字。
+
+  绝对黑名单：
+    ABSOLUTE_BLACKLIST 在所有档位前面判定，不读 sensitivity。
+
+====================================================================
+2. Python 实现
+====================================================================
+2.1 SENSITIVITY 常量 + DEFAULT_SENSITIVITY="normal"
+2.2 classify_transcript(..., config=None)
+      cfg = config or SENSITIVITY["normal"]
+      threshold = cfg["no_speech_threshold"]
+      high-energy: len > cfg["high_energy_len"]
+      long-no-speech: len > cfg["long_no_speech_len"]
+      protect-short: 1..cfg["protect_max_len"]
+      short-phrase: len<=cfg["short_phrase_max_len"] 且
+                    duration<cfg["short_phrase_duration"]
+2.3 HearService
+      self._sensitivity = "normal"
+      configure(level):
+        - 校验 strict/normal/sensitive；
+        - 更新 self._sensitivity；
+        - emit hear.status（含 sensitivity/config）；
+        - 返回 {level,config,sensitivity}。
+      status() 增加 sensitivity / sensitivityConfig。
+      _flush_segment:
+        cfg=SENSITIVITY[self._sensitivity]
+        model.transcribe(no_speech_threshold=cfg[...])
+        classify_transcript(...,config=cfg)
+2.4 CLI
+      hear.configure {level} -> self.hear.configure(level)
+      contract OPS/cmd.json 增加 hear.configure。
+2.5 事件
+      hear.status 带 sensitivity，Node 更新 state.hear.sensitivity。
+
+====================================================================
+3. Node/UI 实现
+====================================================================
+3.1 settings
+      hearSensitivity: 'normal'
+      HEAR_SENSITIVITY = {strict,normal,sensitive}
+      mergeSettings 只接受合法值。
+3.2 POST /vhcu/settings
+      settings = merge...
+      if supervisor?.state==='ready':
+        send('hear.configure',{level:settings.hearSensitivity})
+        send('vision.configure',{privacyBlacklist:...})  // 原有
+      pushStatus。
+      → 热更新，不需要重启。
+3.3 doStartHear
+      启动 Hear 前先发 hear.configure，确保首次以当前档位运行。
+      start 工具返回 sensitivity。
+3.4 UI（⚙ 设置）
+      “听觉灵敏度”下拉：
+        严格（过滤噪音优先）
+        标准（默认平衡）
+        灵敏（保留说话优先）
+      hint：调整后立即热更新 Hear，无需重启 DSH。
+3.5 state
+      state.hear 初始 sensitivity:'normal'；
+      hear.status 更新。
+
+====================================================================
+4. 测试
+====================================================================
+Node 63/63
+  - settings 默认 hearSensitivity=normal；
+    POST sensitive 后持久于插件内存并返回；
+  - P16.7 hot-update 集成：启动视觉守护进程后 POST settings
+    hearSensitivity=strict，state.hear.sensitivity 变为 strict；
+  - client 源码含 vhcu-sensitivity 与三档文案；
+  - 其余 61 项保持。
+Python 88/88
+  - SensitivityConfigTest：
+      configure strict/sensitive 更新 status 与 no_speech 阈值；
+      invalid level 抛 HearError；
+      三档分类差异：3 字 You 在 strict 丢弃、normal/sensitive 保护；
+      9 字长句 strict 丢弃、sensitive 保留；
+      absolute blacklist 三档均丢弃；
+      FakeModel 捕获 transcribe 阈值 [0.5,0.8]。
+  - P16.6/P16.4/P16.3 既有测试保持。
+
+====================================================================
+5. 重启验证
+====================================================================
+5.1 首次加载新代码需重启 DSH 一次（完全退出，无 python.exe）。
+5.2 热更新（不需要再重启）
+  1) [H] Hear 开启；
+  2) ⚙ 设置 → 听觉灵敏度 → 严格，保存；
+  3) 不改窗口，直接播放/说话：
+     严格档下小声短词更容易被丢弃；
+     日志/no_speech 阈值应为 0.5；
+  4) 切到灵敏，保存：
+     长句/高能量阈值变大，短句保护到 8 字；
+     同一段小声 You/你好 应更容易保留；
+  5) 切回标准恢复默认。
+5.3 状态确认
+  - state.hear.sensitivity 应与所选档位一致；
+  - hear.status 事件携带 sensitivity；
+  - 不需要重启 Hear 或 DSH。
+5.4 黑名单
+  - 任意档位播放 "Thank you for watching" 仍应丢弃。
+5.5 注意
+  - 设置保存在插件进程内存，DSH 重启后回到 normal；
+    未做磁盘持久化（与 debug/privacy 设置一致）。
+
+====================================================================
+6. 文件改动
+====================================================================
+【新增】
+  VHCU-P16.7-01-听觉灵敏度热更新-20261101-1859.txt（本报告）
+【修改】
+  vision/vhcu_daemon/hear.py   SENSITIVITY、configure、动态阈值/长度
+  vision/vhcu_daemon/cli.py    hear.configure
+  vision/tests/test_hear.py    三档配置/分类/阈值测试
+  host/lib/fusion.js           （无改动）
+  lib/index.js                 settings、POST 热更新、doStartHear configure
+  lib/client.js                ⚙ 听觉灵敏度下拉
+  contract/lib/contract.js     hear.configure
+  contract/schema/v1/cmd.json  hear.configure
+  host/test/plugin.test.mjs    settings 默认/热更新集成
+  host/test/client.test.mjs    三档 UI 文案
+  package.json / dsh.plugin.json 0.27.0
+  README.md                    P16.7 说明
+【备份】
+  hear.py.bak、cli.py.bak、index.js.bak、client.js.bak、
+  contract.js.bak、cmd.json.bak、package.json.bak、
+  dsh.plugin.json.bak、README.md.bak
+
+====================================================================
+7. 已知边界
+====================================================================
+R1. 设置仅在插件进程内存，DSH 重启回 normal。
+R2. sensitivity 变更对“下一段”音频生效；正在转写的一段仍用旧阈值。
+R3. 严格档 1-2 字保护仍可能误杀小声指令；灵敏档可能保留更多幻听。
+R4. 绝对黑名单与 JSON 长度阈值不随档位改变（按需求）。
+R5. 真实声学环境下三档差异需人工播放/说话验证。
+
+（报告完）

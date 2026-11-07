@@ -1,0 +1,161 @@
+DSH-VHCU  P11.5-01  坐标自动映射（scale_factor + is_relative_to_image）
+生成时间：2026-11-01 10:28 (Asia/Shanghai)
+阶段：P11.5（修复“缩略图坐标直接点击点偏”，把倍率数学收归底层）
+前置：P10 宏编辑/分类完成；本轮按惯例先备份再改
+
+====================================================================
+0. 结论（先看这 6 条）
+====================================================================
+C1. vhcu_get_full_frame 返回新增 image_width/image_height/scale_factor
+    （scale_factor = 真实屏幕宽 / 返回图片宽）。
+C2. vhcu_get_vision_events 的每个 ROI 新增 image_width/image_height/scale_factor；
+    事件级也带 scale_factor（首个 ROI）。ROI 图片坐标换算：
+    真实 x = roi.x + 图片x × scale_factor。
+C3. vhcu_mouse_click 新增可选参数 is_relative_to_image（默认 false）。
+    true 时：Node 取最近一次全屏的 scale_factor 下发，Python 执行
+    round(x*scale) 后再点击；返回 requested/x/y/scale_factor。
+C4. 未取过全屏就 relative 点击 → E_STATE，提示先 vhcu_get_full_frame。
+C5. Description 已明确写入：“如果你是基于 vhcu_get_full_frame 返回的图片测量的坐标，
+    请带上参数 is_relative_to_image=true，底层会自动帮你转换成真实坐标。”
+C6. 测试：Node 37/37、Python 43/43；新增 full_frame 倍率/PNG 宽度一致、
+    relative click 数学转换、无图 E_STATE、ROI 倍率、Python 非法 scale 用例。
+
+====================================================================
+1. 返回图片的倍率契约
+====================================================================
+1.1 full_frame（lib/index.js captureFullFrame）
+  image_width  = min(capture.width, max_width)
+  image_height = round(capture.height * image_width / capture.width)
+  scale_factor = round6(capture.width / image_width)
+  返回 JSON 增加：
+    image_width / image_height / scale_factor
+  示例：屏幕 1920x1080，max_width=800 → image 800x450，scale_factor=2.4。
+  message 附带：“基于该图片测量的坐标点击时请传 is_relative_to_image=true”。
+
+1.2 vision events（diff handler + recentDiffEvents）
+  每个 ROI：
+    image_width  = min(roi.w, 960)          # frame_url 默认 max_width=960
+    image_height = round(roi.h * image_width / roi.w)
+    scale_factor = round6(roi.w / image_width)
+  事件级：scale_factor = 首个 ROI 的 scale_factor（便于整体理解）。
+  recentDiffEvents 对旧 ring 条目也补算缺失字段，保证返回契约稳定。
+
+====================================================================
+2. 点击自动映射
+====================================================================
+2.1 Node（vhcu_mouse_click）
+  参数：x, y, is_relative_to_image(boolean, 可选)
+  - relative=false：args {x,y}（旧行为，物理像素）；
+  - relative=true：
+      若 lastFrameMeta == null → E_STATE（先取全屏）；
+      args {x,y,scaleFactor}；
+      返回 {requested:[x,y], x:applied_x, y:applied_y, scale_factor, is_relative_to_image}；
+      message：“图片坐标 (x,y) × scale ⇒ 物理坐标 (ax,ay)，已点击。”
+  - lastFrameMeta 在每次成功 full_frame 时更新；
+    start/stop/restart 时清空（避免分辨率变化后的陈旧倍率）。
+2.2 Python（input.click）
+  click(x, y, scale_factor=None)：
+    - int 校验 x/y；
+    - scale 默认 1.0，必须 0.1..10，否则 E_PROTO；
+    - real_x = round(x*scale)，real_y = round(y*scale)；
+    - normalize_click 后再 SendInput；
+    - dry-run 返回 requested/scaleFactor/applied/normalized；
+    - 真实点击同样返回 applied。
+  cli.py input.click 读取 args.scaleFactor 传入。
+2.3 责任边界
+  模型只负责“在图片上量像素”；倍率乘法在 Python 守护进程内完成，
+  符合“大模型不负责数学计算”的架构原则。
+
+====================================================================
+3. 描述更新
+====================================================================
+  vhcu_mouse_click：
+    “如果你是基于 vhcu_get_full_frame 返回的图片测量的坐标，请带上参数
+     is_relative_to_image=true，底层会自动帮你转换成真实坐标。”
+    并说明 ROI 坐标直接传物理 x/y；不带参数仍是物理坐标。
+  vhcu_get_full_frame：
+    说明 scale_factor = 真实屏幕宽/图片宽；基于图片测量时传 relative=true。
+  vhcu_get_vision_events：
+    说明 ROI 的 image_width/image_height/scale_factor 与 ROI 原点换算公式。
+
+====================================================================
+4. 测试
+====================================================================
+4.1 Node 37/37
+  P6 full frame：
+    - image_width=800、image_height=450、scale_factor=width/800；
+    - 实际 PNG 800x450 与字段一致；
+    - 未取全屏时 relative click → E_STATE；
+    - relative click(100,50) → x=round(100*scale)、y=round(50*scale)，
+      requested 保留 [100,50]，is_relative_to_image=true；
+  P4 vision events：
+    - ROI image_width=min(w,960)、scale_factor=w/image_width；
+    - 事件级 scale_factor 与 ROI 一致；
+    - 实际 ROI PNG 宽度 == image_width。
+  其余 13 工具/6 路由/宏/安全用例保持通过。
+4.2 Python 43/43
+  - click(100,120,2.5) → applied [250,300]、requested [100,120]、scaleFactor 2.5；
+  - click(..., 0) → E_PROTO；
+  - 原有 IME/宏/输入/安全用例通过。
+
+====================================================================
+5. 重启验证
+====================================================================
+5.1 重启
+  完全退出 DSH（确认 Electron/python.exe 无残留）→ 重开 → 新会话。
+  日志：
+    dsh-vhcu: mounted (routes /vhcu/state|events|control|frame|settings|macros)
+    dsh-vhcu: registered 13 tools
+5.2 全屏图倍率
+  让模型调用 vhcu_get_full_frame(max_width=800)，检查返回：
+    image_width=800, image_height=比例, scale_factor=屏幕宽/800。
+5.3 自动点击
+  让模型在图片坐标 (100,50) 点击并传 is_relative_to_image=true：
+    预期工具返回 x=round(100*scale)、y=round(50*scale)，
+    message 显示“图片坐标 × scale ⇒ 物理坐标”。
+5.4 边界
+  - 不先取图直接 relative → E_STATE；
+  - 普通点击（不带参数）仍是物理坐标；
+  - stop/start 后旧 scale 清空，需要重新取图。
+5.5 真实场景
+  打开一个窗口 → full_frame(max_width=800) → 用图片坐标点按钮：
+  不再需要模型心算 1920/800。
+
+====================================================================
+6. 文件改动
+====================================================================
+【新增】
+  VHCU-P11.5-01-坐标自动映射-20261101-1028.txt（本报告）
+【修改】（覆盖前已改名 .bak）
+  lib/index.js                 full_frame/ROI 倍率字段；relative click；
+                               lastFrameMeta 生命周期；描述更新
+  vision/vhcu_daemon/input.py  click(scale_factor) 乘法 + 校验 + applied
+  vision/vhcu_daemon/cli.py    读取 args.scaleFactor
+  vision/tests/test_input.py   scale 点击/非法 scale 用例
+  host/test/plugin.test.mjs    full_frame 倍率、relative click、ROI 倍率断言
+  package.json / dsh.plugin.json  0.11.0
+  README.md                    P11.5 坐标契约与验收
+【未改】
+  lib/client.js（UI 无变化）、contract、runner.py、httpframe.py、macros.js
+
+备份：lib/index.js.bak、input.py.bak、cli.py.bak、test_input.py.bak、
+      plugin.test.mjs.bak、package.json.bak、dsh.plugin.json.bak、README.md.bak、
+      client.js.bak。
+
+====================================================================
+7. 已知边界与下一步
+====================================================================
+R1. ROI 图片坐标需要加 ROI 原点（事件已给 roi.x/roi.y 与 scale_factor）；
+    full-frame relative 按整图映射。
+R2. 取图后若分辨率/缩放变化，缓存 scale 会过期 → 重新取图；stop/start 已清空。
+R3. 宏 steps 里的 click 仍是物理坐标，不参与 relative 映射（宏录制建议键盘流）。
+R4. 仍只支持主屏；多屏/多 DPI 屏未支持。
+R5. is_relative_to_image 只对最近一次 full_frame 生效，不能指定历史帧。
+
+P12 建议：
+  N1. 支持按 frame id 指定坐标所属图片；
+  N2. ROI frame 内坐标点击（自动加 ROI 原点）；
+  N3. 多屏/负坐标虚拟桌面；
+  N4. 宏录制时把 click 自动标记为相对图片坐标。
+
+（报告完）

@@ -1,0 +1,135 @@
+DSH-VHCU  P17.3-01  上下文精准匹配 + 宏流水线预判
+生成时间：2026-11-01 20:00 (Asia/Shanghai)
+阶段：P17.3（target_app 误报修复 + Speculative Macro Queue）
+前置：P17.2 技能自生长实战通过
+
+====================================================================
+1. 时间 / 阶段 / 范围
+====================================================================
+  时间：2026-11-01 20:00 +08:00
+  阶段：P17.3
+  范围：
+    - host/lib/macros.js：推荐宏的目标匹配与宿主窗口排除；
+    - lib/index.js：vhcu_run_macro 新增 macros_queue 串行流水线；
+    - 不改 Python；不改 /vhcu/emergency-stop；不改宏存储格式。
+
+====================================================================
+2. 本轮交付物
+====================================================================
+2.1 修复 target_app 误报
+    旧逻辑：
+      title.toLowerCase().includes(target_app.toLowerCase())
+      → DSH 窗口标题“计算器 - DeepSeek Harness”命中 target_app="计算器"，
+        错误推荐计算器专精宏。
+    新逻辑：
+      A. isHostWindowTitle(title):
+           /deepseek[\s-]*harness/i
+           /deepseek\s+desktop/i
+           /\bdsh\b/i
+         命中任一条 → 该窗口只返回通用宏，不匹配任何 app 专精宏。
+      B. targetMatchesTitle(title,target):
+           Unicode 词边界正则：
+           (^|[^\p{L}\p{N}])target(?=$|[^\p{L}\p{N}])
+         效果：
+           target "calc" 不再匹配 "calculator"；
+           "notepad" 匹配 "未命名 - 记事本 Notepad"；
+           "chrome" 匹配 "Google Chrome"；
+           "计算器" 匹配独立词，不匹配“计算器科学”这种连写。
+      C. recommendMacros(macros,title):
+           enabled && (!target_app || (!host && targetMatchesTitle))
+2.2 宏流水线 macros_queue
+    工具：vhcu_run_macro
+    新参数：
+      macros_queue: [
+        "macro_a",
+        { "name": "macro_b", "variables": {"x":"1"} }
+      ]
+    行为：
+      1. Node 逐个 find 宏；
+      2. executeStoredMacro(A)：
+           - 调 Python input.macro.run；
+           - 完成后立刻 captureFullFrame（全屏截图校验）；
+           - 返回 ok + verify.ok + frame_url；
+      3. A ok 且 verify.ok=true → 立即执行 B；
+      4. A 失败/禁用/缺变量/截图失败 → 立即停止，返回 failed_at；
+      5. 全部成功 → {ok:true, action:"macro_queue", count, results,
+         queue_ms, message}。
+    限制：1..10 个宏；每项可为字符串或 {name,variables}；
+         结果中保留每个宏的 frame_url/elapsed_ms/texts。
+2.3 工具描述
+    vhcu_get_recommended_macros 明确：
+      标题按词边界严格匹配；DSH/DeepSeek Harness 窗口只返回通用宏。
+    vhcu_save_macro target_app 说明：
+      填应用/窗口标题词，不要填整段标题。
+    vhcu_run_macro 增加 macros_queue 说明。
+
+====================================================================
+3. 证据
+====================================================================
+3.1 实读源码
+    host/lib/macros.js：recommendMacros 原实现为 includes；
+                        新增 HOST_TITLE_PATTERNS/targetMatchesTitle；
+    lib/index.js：executeStoredMacro 已调用 captureFullFrame 并返回
+                  verify.ok；新增 executeMacroQueue；
+    vhcu_run_macro schema 原 required:['name']，现移除，
+                  支持 macros_queue，execute 先校验队列。
+3.2 实测
+    Node 68/68 通过；
+    Python 88/88 通过；
+    macros.test 新增：
+      DSH 标题“计算器 - DeepSeek Harness”只返回通用宏；
+      “计算器”正常返回 calc 专精宏；
+      targetMatchesTitle("calculator","calc") === false；
+      "Calculator"/"Google Chrome"/"未命名 - 记事本 Notepad" 命中；
+    plugin P11.8 新增队列集成：
+      macros_queue [macro_copy, macro_paste] → count=2、
+        results 两项 verify.ok、queue_ms 数字；
+      字符串队列 [macro_undo, macro_select_all] → count=2；
+      第二项不存在 → E_NOT_FOUND、failed_at=1、results 长度1。
+3.3 未实测
+    - 真实计算器窗口的 title/推荐闭环（P17.2 已人工验证，本轮逻辑变更需复测）；
+    - 两步真实点击（=、CE）队列的视频级回读；
+    - 用户自定义 target_app 与进程名不一致场景。
+
+====================================================================
+4. 风险与未验证项
+====================================================================
+R1. 宿主识别依赖标题标记（deepseek harness/dsh）；
+    若未来 DSH 窗口标题不含这些词，仍可能误报。下一步可接进程名/PID。
+R2. 词边界对中文“计算器”匹配独立词；若窗口标题是“计算器科学版”，
+    不会匹配“计算器”（避免误报），但可能漏掉真实变体。
+R3. 流水线只做“截图成功”校验，不做像素语义异常判断；
+    画面异常但截图成功时仍会继续执行 B。
+R4. 队列每步 captureFullFrame 需要视觉守护进程；
+    未启动视觉会失败，需先 vhcu_start_vision。
+R5. 队列串行执行，不并行；B 不会在 A 截图完成前启动。
+R6. macros_queue 最多 10 个，避免长时间占用输入。
+
+====================================================================
+5. 待确认决策（编号）
+====================================================================
+D1. 宿主排除按标题标记（DeepSeek Harness/DSH），不接进程名；
+    若仍有误报，下一步增加 foreground PID/process name。
+D2. target_app 采用 Unicode 词边界，而不是“标题开头”；
+    这样 "notepad" 可匹配标题尾部，但 "calc" 不匹配 "calculator"。
+D3. 流水线只校验截图成功，不做图像内容语义判断；
+    语义异常需要未来视觉模型评分。
+D4. 队列失败即停止，不自动回滚 A（避免不可控的二次操作）。
+
+====================================================================
+6. 下一步计划
+====================================================================
+N1. 用户重启 DSH 后复测：
+    - 当前 DSH 窗口标题含“计算器”时，推荐列表不应有 macro_calc_multiply；
+    - 切到计算器窗口，推荐应命中。
+N2. 测试队列：
+    vhcu_run_macro({macros_queue:[
+      {name:"macro_copy"},
+      {name:"macro_paste"}
+    ]})
+    期望 count=2、两项 verify.ok、queue_ms 返回。
+N3. 用真实两步计算器动作（如先 = 再 CE）验证画面衔接；
+    若需要，给队列增加“预期画面文本”断言。
+N4. 后续可接 foreground process name/PID，彻底替代标题启发式。
+
+（报告完）

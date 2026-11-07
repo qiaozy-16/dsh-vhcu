@@ -1,0 +1,215 @@
+DSH-VHCU  P9-01  宏持久化与自生长（macros.json / vhcu_save_macro / vhcu_run_macro）
+生成时间：2026-10-31 23:06 (Asia/Shanghai)
+阶段：P9（把两个写死宏升级为可持久化、可动态生成、可重放的宏系统）
+前置：P8 三栏 UI + ⚙ 设置已完成；本轮按惯例先备份再改
+
+====================================================================
+0. 结论（先看这 7 条）
+====================================================================
+C1. 宏库持久化到 %LOCALAPPDATA%\dsh-vhcu\macros.json（可用 VHCU_MACROS_PATH 覆盖）。
+    字段：name / description / steps[] / enabled；重启 DSH 后自定义宏与启用状态都保留。
+C2. 首次启动自动播种两条内置宏：open_notepad_and_type（Win+R→notepad→等待→输入
+    {{text}}）与 save_file（Ctrl+S）。文件损坏时改名 .broken 后重新播种；
+    写入用临时文件+rename 原子替换。
+C3. 新增工具 vhcu_save_macro(name, description, steps)：模型把刚完成的真实点击/输入/按键
+    序列打包保存；自动追加到 JSON 并触发状态刷新，重名返回 E_CONFLICT。
+C4. 新增工具 vhcu_run_macro(name, text?)：执行 JSON 中任意宏；被禁用返回 E_DENIED；
+    执行前要求 start_vision，执行后自动全屏抓帧校验（frame_url + verify）。
+C5. 通用执行器：Node 校验 steps → 下发 input.macro.run → Python run_macro 逐步执行
+    click/type/key/scroll/drag/wait；任一步失败 E_MACRO_FAILED（带步骤号）。
+    旧的两个 vhcu_macro_* 工具改为从宏库取内置宏执行（不再走写死 Python 逻辑）。
+C6. UI ⚙ 宏管理改为动态列表：GET /vhcu/macros 渲染，每行 checkbox 启用/禁用，
+    [+ 新建宏] 表单（名称/描述/steps JSON）POST 保存；打开设置浮层时自动拉取，
+    工具新增宏后 macrosRevision 变化会触发刷新。
+C7. 测试：Node 36/36、Python 41/41。新增宏库单测（持久化重载/启用持久/非法步骤/重名/
+    {{text}} 替换）、插件 13 工具/6 路由/宏 save-run-禁用端到端、Python run_macro dry-run。
+
+====================================================================
+1. 持久化宏库（host/lib/macros.js，新增）
+====================================================================
+1.1 路径
+  defaultMacrosPath():
+    VHCU_MACROS_PATH → 指定文件
+    否则 %LOCALAPPDATA%\dsh-vhcu\macros.json（非 Windows 用 XDG_DATA_HOME 或 ~/.local/share）
+1.2 数据格式
+  { "version": 1,
+    "macros": [
+      { "name": "open_settings", "description": "打开设置页", "enabled": true,
+        "steps": [
+          {"op":"click","x":812,"y":64},
+          {"op":"wait","ms":300},
+          {"op":"type","text":"{{text}}"},
+          {"op":"key","keys":["ctrl","s"]}
+        ] } ] }
+1.3 步骤白名单（常量 STEP_OPS）
+  click{x,y} / type{text} / key{keys[]} / scroll{amount} / drag{x1,y1,x2,y2} / wait{ms}
+  限制：1-50 步；name 2-64（字母数字_-）；description ≤240；text ≤2000；
+        wait 0-5000ms；scroll ±20 且非 0；key 1-4 个；坐标非负整数。
+1.4 存储语义
+  - MacroStore.load()：读文件 → 校验；ENOENT 或损坏 → 种子宏 + persist；
+  - add()：重名 E_CONFLICT；超过 100 条 E_LIMIT；
+  - setEnabled()/remove()：找不到 E_NOT_FOUND；
+  - persist()：mkdir + 临时文件 write + rename（原子）；
+  - revision：每次变更自增，随 snapshot.macrosRevision 下发。
+
+====================================================================
+2. 通用执行器
+====================================================================
+2.1 Node
+  executeStoredMacro(macro,{text})：
+    - macro 不存在 → E_STATE；!enabled → E_DENIED；
+    - substituteText(steps,text)：把 type.text 中的 {{text}} 替换为调用参数；
+    - 展开后单步 text >2000 → E_PROTO；
+    - runInputAction('input.macro.run',{steps},{timeoutMs:30000,
+      action:`macro_${name}`, detail:`N steps`})；
+    - 成功自动 captureFullFrame(1280) → frame_url + verify；清除回读 pending；
+    - 返回 {ok,macro,dry_run,elapsed_ms,steps,steps_executed,steps_count,frame_url,verify,message}。
+  vhcu_macro_open_notepad_and_type(text) / vhcu_macro_save_file()：
+    取内置宏名 open_notepad_and_type / save_file，走同一执行器。
+2.2 Python（input.py run_macro）
+  - 校验 steps 1..50；_rate_limit + _failsafe 各一次（整个宏算一个动作）；
+  - dry_run：返回 {dryRun:true,count,steps:[op...],elapsedMs:0}，不注入；
+  - 逐步 dispatch：
+      click：normalize_click → MOVE|ABSOLUTE + LEFTDOWN + LEFTUP
+      type ：_ensure_ascii_input() + _type_unicode
+      key  ：parse_hotkey + _send_combo
+      scroll：MOUSEEVENTF_WHEEL（amount*120）
+      drag ：MOVE→LEFTDOWN→12 步插值→LEFTUP（finally 释放）
+      wait ：sleep(ms/1000)
+  - 任一步异常 → E_MACRO_FAILED（消息含 step index + op），ack 透传。
+2.3 协议
+  OPS / cmd.json 增加 input.macro.run；cli.py 解析 steps 调 run_macro。
+
+====================================================================
+3. 工具
+====================================================================
+  vhcu_save_macro(name, description, steps)
+    - steps raw schema：array 1..50 of object；实际规范化在 MacroStore；
+    - 返回 {ok, macro, macros:数量, revision, message}；失败 E_CONFLICT/E_PROTO/E_LIMIT。
+  vhcu_run_macro(name, text?)
+    - text 可选，用于替换 {{text}}；不存在 E_NOT_FOUND，禁用 E_DENIED。
+  vhcu_macro_open_notepad_and_type(text) / vhcu_macro_save_file()
+    - 兼容旧接口，内部改为执行宏库中的同名内置宏；
+    - 旧 Python input.macro.open_notepad/save 仍保留（兼容），Node 不再调用。
+
+====================================================================
+4. UI（lib/client.js）
+====================================================================
+  ⚙ 设置 → 宏管理：
+    - 打开设置时 GET /vhcu/macros；
+    - 动态列表：checkbox + name + “N 步 · 描述”；
+    - 勾选/取消 → POST {action:'toggle', name, enabled}；
+    - [+ 新建宏] → 表单（name/description/steps JSON textarea）→
+      POST {action:'save', macro}；失败显示错误（如 steps JSON 无效）；
+    - 添加/切换后更新列表与 macrosRevision；
+    - SSE status 里 macrosRevision 变化且设置浮层打开时自动重新拉取
+      （模型用 vhcu_save_macro 新存的宏会即时出现）。
+  仍只有一个侧边栏 Tab（VHCU）；没有新增 Tab。
+
+====================================================================
+5. 接口
+====================================================================
+  GET  /vhcu/macros  → {ok, macros[], revision}
+  POST /vhcu/macros  → {action:'save'|'toggle'|'delete', ...}
+                        JSON + x-vhcu:1；错误 400 + code（E_CONFLICT/E_PROTO/...）
+  GET  /vhcu/state   → state.macrosRevision（列表本身按需 GET）
+  其余路由同 P8（state/events/control/frame/settings）。
+
+====================================================================
+6. 测试与验证
+====================================================================
+6.1 Node 36/36
+  - host/test/macros.test.mjs（新增 3 项）：
+      种子 2 条 + 文件写入 version=1；add 后重新 new MacroStore 仍能读到；
+      setEnabled 持久化；非法 name/steps/坐标 → E_PROTO；重名 → E_CONFLICT；
+      normalizeSteps + substituteText（原 steps 不被修改）。
+  - plugin.test.mjs（9 项）：
+      13 工具、6 路由（含 /vhcu/macros）；
+      GET 种子宏、POST save、toggle 后 enabled=false、重复 save → 400 E_CONFLICT；
+      P9 端到端：start → vhcu_save_macro(p9_flow) → 重名 E_CONFLICT →
+        vhcu_run_macro → dry_run + steps_executed ['key','wait'] →
+        不存在 E_NOT_FOUND → POST toggle false → run 返回 E_DENIED；
+      P7 宏测试更新为通用执行器（steps=['key','wait',...]）。
+  - client.test.mjs 3 项（三栏/⚙/标题 VHCU）仍通过。
+6.2 Python 41/41
+  - MacroRunnerTest：run_macro dry-run 返回 steps 列表；非法形状 E_PROTO。
+  - 原 IME/宏/输入用例保持通过。
+6.3 dev harness 烟测
+  - 路由 6；GET /vhcu/macros 返回两条种子；POST save dev_smoke 返回 revision=1。
+6.4 未自动化
+  - 真实 UI 点击新建宏后的视觉效果（需重启 DSH 人工看）；
+  - 真实宏重放（会操作桌面，按第 7 节验收）。
+
+====================================================================
+7. 重启验证
+====================================================================
+7.1 重启
+  ① 完全退出 DSH（托盘退出；确认 Electron/python.exe 无残留）；
+  ② 重开 DSH；新会话；
+  ③ 日志：
+      dsh-vhcu: mounted (routes /vhcu/state|events|control|frame|settings|macros)
+      dsh-vhcu: registered 13 tools
+7.2 持久化验证
+  1) 侧边栏 VHCU → ⚙：应看到 open_notepad_and_type / save_file 两条宏与勾选；
+  2) 让模型执行一段操作后：
+     「用视觉打开记事本；把刚才的步骤用 vhcu_save_macro 保存为 demo_open_notepad；
+      然后 vhcu_run_macro("demo_open_notepad") 重放一次。」
+     ⚙ 宏列表应即时出现 demo_open_notepad；
+  3) 完全关闭 DSH 再重开 → ⚙ 里 demo_open_notepad 仍在（macros.json 持久化）；
+  4) 取消勾选 demo_open_notepad → 让模型 run → 应返回 E_DENIED；
+  5) 勾选恢复 → run 成功，返回 elapsed_ms / steps / frame_url。
+7.3 手工新建
+  ⚙ → [+ 新建宏] → 填 name=manual_test，steps:
+    [{"op":"key","keys":["ctrl","s"]}]
+  → 保存 → 列表出现；重启后仍在。
+7.4 若宏列表为空/保存失败
+  - 检查 %LOCALAPPDATA%\dsh-vhcu\macros.json 是否存在且为合法 JSON；
+  - 若出现 macros.json.broken，说明原文件损坏（种子已重建）；
+  - 确认 DSH 进程对 LOCALAPPDATA 有写权限；可用 VHCU_MACROS_PATH 指向可写目录。
+
+====================================================================
+8. 文件改动
+====================================================================
+【新增】
+  host/lib/macros.js                    宏库：路径/种子/校验/持久化/{{text}} 替换
+  host/test/macros.test.mjs             宏库单测
+  VHCU-P9-01-宏持久化与自生长-20261031-2306.txt（本报告）
+【修改】（覆盖前已改名 .bak）
+  lib/index.js                          MacroStore 接入；/vhcu/macros 路由；
+                                        vhcu_save_macro / vhcu_run_macro；
+                                        executeStoredMacro；旧宏工具改走宏库；
+                                        macrosRevision
+  lib/client.js                         ⚙ 宏管理动态列表 + 新建宏表单 + 自动刷新
+  vision/vhcu_daemon/input.py           run_macro 通用执行器 + 步骤 dispatch
+  vision/vhcu_daemon/cli.py             input.macro.run 分发
+  contract/lib/contract.js              OPS + input.macro.run
+  contract/schema/v1/cmd.json           op enum + input.macro.run
+  host/test/plugin.test.mjs             13 工具/6 路由/宏 API/保存-运行-禁用用例
+  vision/tests/test_input.py            MacroRunnerTest
+  package.json / dsh.plugin.json        0.9.0
+  README.md                             P9 宏系统、路径、步骤格式、验收
+【未改】
+  runner.py、httpframe.py、install.mjs
+
+备份：lib/index.js.bak、lib/client.js.bak、input.py.bak、cli.py.bak、contract.js.bak、
+      cmd.json.bak、plugin.test.mjs.bak、client.test.mjs.bak、package.json.bak、
+      dsh.plugin.json.bak、README.md.bak。
+
+====================================================================
+9. 已知边界与下一步
+====================================================================
+R1. 宏只含固定原语，无 if/循环/嵌套宏；这是安全边界。
+R2. 坐标是录制时的物理像素；分辨率/布局变化会点偏，需要重新录制。
+R3. 宏执行前必须 start_vision；执行后自动全屏校验。
+R4. settings（debug/IME）仍只存进程内；P9 只有宏持久化。
+R5. 多屏仍只支持主屏。
+R6. 宏编辑/删除 UI 只做了启用开关与新建；删除 API 已有（delete），UI 可后续补。
+
+P10 建议：
+  N1. 宏录制模式（自动把工具调用流写为 steps 草稿）；
+  N2. 宏编辑/删除/导入导出 UI；
+  N3. 带窗口标题/相对坐标的稳健化（防止窗口移动）；
+  N4. 条件步骤（wait_for_window）与失败重试策略；
+  N5. 多屏/混合 DPI。
+
+（报告完）

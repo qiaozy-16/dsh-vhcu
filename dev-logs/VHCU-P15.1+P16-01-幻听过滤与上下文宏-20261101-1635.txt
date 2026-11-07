@@ -1,0 +1,195 @@
+DSH-VHCU  P15.1 + P16-01  ASR 幻听过滤 + 软件上下文宏
+生成时间：2026-11-01 16:35 (Asia/Shanghai)
+阶段：P15.1（ASR 幻听）+ P16（活动窗口上下文宏）
+前置：P15 多模态融合完成
+
+====================================================================
+0. 结论（先看这 7 条）
+====================================================================
+C1. faster-whisper 调用增加：
+      no_speech_threshold=0.6
+      log_prob_threshold=-1.0
+C2. Python 端新增 should_discard_transcript()：
+    纯标点/符号、[Music]/[Applause]/Hover 等无意义词、单 ASCII 字母
+    直接丢弃，不 emit hear.text。
+C3. 真实中文/英文/韩文/日文文本保留，不做全局语言过滤。
+C4. 新增 sys.active_window 命令与 vhcu_get_active_window 工具，
+    复用 Win32 GetForegroundWindow/GetWindowTextW。
+C5. vhcu_start_vision / vhcu_start_hear 返回 JSON 增加 active_window。
+C6. 宏新增可选 target_app；新增 vhcu_get_recommended_macros：
+    target_app 匹配当前窗口的宏 + 无 target_app 的通用宏（仅已启用）。
+C7. 测试：Node 55/55、Python 73/73。
+    未为“没抓到实拍帧”增加任何延迟/保存逻辑。
+
+====================================================================
+1. 任务一：过滤 ASR 幻听
+====================================================================
+1.1 hear.py imports
+      re, unicodedata
+1.2 常量
+      _MEANINGLESS_TOKENS = {
+        music, applause, laughter, hover, silence, noise, sound, speech,
+        音乐, 掌声, 笑声, 静音, 噪音, 声音
+      }
+      _TAG_RE = \[...\] / (... ) / （...）/ 【...】
+1.3 should_discard_transcript(text)
+      - 空/空白 → True；
+      - 单个 ASCII 字母（A/z）→ True；
+      - 去掉 [Music] 等括号标签后：
+          · 没有字母/数字 → True（纯标点/符号/♪）；
+          · 所有 token 都在 meaningless 集合 → True；
+      - 否则 False。
+      示例：
+        丢弃: "", "...", "!!!", "♪ ♫", "[Music]", "[Applause]",
+              "Hover", "[Hover]", "Music", "音乐", "[Music] [Applause]"
+        保留: "请打开设置", "打开音乐播放器", "Hover 请点击这里",
+              "안녕하세요", "Hello world", "Open the settings"
+      - 不按语言全局过滤，避免误删真实韩语/日语。
+1.4 whisper 参数
+      model.transcribe(
+          audio,
+          beam_size=1,
+          vad_filter=False,
+          condition_on_previous_text=False,
+          no_speech_threshold=0.6,
+          log_prob_threshold=-1.0,
+      )
+1.5 过滤位置
+      text = 转写结果
+      if should_discard_transcript(text):
+          print("[hear] discarded hallucination: ...", stderr)
+          return
+      → 不更新 _last_text、不 emit、不进入融合层。
+1.6 未做
+      - 未增加“播放结束后延迟抓帧”或保存逻辑（按需求，属测试者关窗时序）。
+      - 未对 whisper 模型或 VAD 参数做其它改动。
+
+====================================================================
+2. 任务二：软件上下文感知宏（P16）
+====================================================================
+2.1 活动窗口
+      Python:
+        privacy.foreground_title() 复用 Win32；
+        CLI 新增 op: sys.active_window
+          ack {title, active_window, ts}
+      Contract:
+        OPS + cmd.json enum 增加 sys.active_window。
+      Node:
+        state.activeWindow = {title, ts}
+        fetchActiveWindow(sup) 发送 sys.active_window，失败保留旧值；
+        doStart/doStartHear 成功后刷新 activeWindow。
+2.2 vhcu_get_active_window
+      - 若守护进程已 ready，直接查询；
+      - 若未运行，临时 ensureDaemonReady 查询，随后在
+        无 vision/hear 时 stop，不留下空闲 Python；
+      - 返回 {ok,title,active_window,ts,message}。
+2.3 start 工具返回
+      vhcu_start_vision:
+        {ok,running,phase,fps,source,pid,active_window,message}
+      vhcu_start_hear:
+        {ok,running,state,model,device,compute_type,model_path,
+         active_window,message}
+2.4 宏 target_app
+      host/lib/macros.js normalizeMacro:
+        target_app = String(raw.target_app ?? '').trim().slice(0,80) || null
+      持久化 macros.json 自动带该字段；旧宏无字段 → null（通用）。
+      vhcu_save_macro 参数增加 target_app（可选，maxLength 80）。
+2.5 推荐宏
+      export function recommendMacros(macros, activeTitle):
+        enabled 且 (无 target_app 或 activeTitle 包含 target_app，大小写不敏感)
+      vhcu_get_recommended_macros:
+        - 查询 active_window；
+        - 返回 {active_window,count,macros,message}；
+        - 每条 {name,description,category,target_app,variables}；
+        - 窗口标题不可用时只返回通用宏。
+2.6 UI（⚙ 宏管理）
+      - 宏详情编辑增加 target_app 输入框（内置宏只读）；
+      - 新建宏表单增加 target_app 输入框；
+      - 宏列表行显示“适用 xxx / 通用”。
+
+====================================================================
+3. 测试
+====================================================================
+Node 55/55
+  - macros.test: target_app 归一化（trim/空→null）、
+    recommendMacros 按 "Notepad"/"Google Chrome" 匹配，
+    禁用宏不推荐，无标题仅通用；
+  - plugin.test:
+      19 个工具注册（新增 active_window / recommended_macros）；
+      P5 启动视觉后 active_window 为 string，
+      vhcu_get_active_window 返回 title，
+      vhcu_get_recommended_macros 含通用 macro_launch_app；
+  - fusion/client/contract 等保持。
+Python 73/73
+  - HallucinationFilterTest：
+      空/标点/Music/Applause/Hover/音乐 → discard；
+      中文句子、Hover+正文、韩语、英文 → keep；
+      FakeModel 捕获 transcribe kwargs 断言 0.6 / -1.0；
+      [Music] 结果不 emit（events 为空）。
+  - P14/P13 全部保持。
+
+====================================================================
+4. 重启验证
+====================================================================
+4.1 完全退出 DSH（无 python.exe/Electron 残留）→ 重开。
+4.2 幻听过滤
+  1) [H] Hear → 开启听觉；
+  2) 播放“纯音乐 + 动效”视频；
+  3) 预期：
+      - 不再出现 [Music]、[Applause]、Hover、纯标点、单字母；
+      - 日志可见 [hear] discarded hallucination: '[Music]'；
+      - 正常中文/英文解说仍出现；
+  4) 若仍有幻听：看日志是否 transcribe 返回了带实际文字的长句；
+     可再调高 no_speech_threshold，但本轮未做。
+4.3 活动窗口
+  1) 调 vhcu_get_active_window → 返回当前窗口标题；
+  2) 切换窗口（记事本/Chrome/VS Code）再调，标题应变化；
+  3) 若守护进程未运行，工具会短暂启动后释放 Python。
+4.4 start 返回
+  - vhcu_start_vision 返回 JSON 应含 active_window 字段；
+  - vhcu_start_hear 返回 JSON 也应含 active_window。
+4.5 上下文宏
+  1) ⚙ 宏管理 → 编辑/新建宏 → 填 target_app（如 notepad）；
+  2) 打开记事本为前台，调 vhcu_get_recommended_macros；
+     应返回该 target_app 宏 + 通用宏，不返回 chrome 专用宏；
+  3) 切到 Chrome 再调，应返回 chrome 宏 + 通用宏；
+  4) target_app 留空 = 通用宏，任何窗口都推荐。
+4.6 回归
+  - [M] 融合、隐私黑名单、坐标钳制、空闲 watchdog、破坏键确认保持。
+
+====================================================================
+5. 文件改动
+====================================================================
+【新增】
+  VHCU-P15.1+P16-01-幻听过滤与上下文宏-20261101-1635.txt（本报告）
+【修改】
+  vision/vhcu_daemon/hear.py     whisper 阈值、should_discard_transcript、过滤
+  vision/vhcu_daemon/cli.py      sys.active_window
+  vision/tests/test_hear.py      幻听过滤/阈值测试
+  host/lib/macros.js             target_app 归一化、recommendMacros
+  host/test/macros.test.mjs      target_app/推荐测试
+  lib/index.js                   activeWindow、两个新工具、start 返回字段、
+                                 save_macro target_app
+  lib/client.js                  宏 target_app 输入框/列表显示
+  contract/lib/contract.js       sys.active_window
+  contract/schema/v1/cmd.json    sys.active_window
+  host/test/plugin.test.mjs      19 工具、active/recommended 测试
+  package.json / dsh.plugin.json 0.21.0
+  README.md                      P15.1/P16 说明
+【备份】
+  hear.py.bak、cli.py.bak、macros.js.bak、index.js.bak、client.js.bak、
+  package.json.bak、dsh.plugin.json.bak、README.md.bak
+
+====================================================================
+6. 已知边界
+====================================================================
+R1. 幻听过滤是规则式：真实语音里只念 “Music” 也会被丢；
+    含正文的音乐标签会保留。
+R2. target_app 是窗口标题子串匹配，不读取进程名；标题变化会影响推荐。
+R3. vhcu_get_active_window 在守护进程未运行时临时启动/停止 Python，
+    首次调用有 1-2s 延迟。
+R4. target_app 最长 80 字符，不做正则/通配符。
+R5. 真实前台窗口标题与宏推荐需重启后人工验证。
+R6. 未为测试者“播放结束立即关窗”增加任何延迟——如实保持原时序。
+
+（报告完）

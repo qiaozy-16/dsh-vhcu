@@ -1,0 +1,261 @@
+DSH-VHCU  P2-01  DSH 插件壳与侧边栏 UI 交付报告
+生成时间：2026-10-31 19:33 (Asia/Shanghai)
+阶段：P2（宿主插件化 + SSE + betterSidebar tab + 极简暗色面板）
+前置：P0 总线已通过；用户实测 mss 抓屏 37ms、diff P50 2.54ms、ROI 图 8KB
+本轮约束：UI 极简；直接覆盖原文件；覆盖前原文件改名为 xxx.bak（只保留最近一份）
+
+====================================================================
+0. 结论（先看这 6 条）
+====================================================================
+C1. dsh-vhcu 已成为可挂载的 DSH 插件：package.json 的 dsh.bundle.patch +
+    dsh.plugin.json + cordis.patch.yml 三件套齐备，依赖零新增。
+C2. 宿主半注册了 4 条同源路由：/vhcu/state、/vhcu/events（SSE）、/vhcu/control、
+    /vhcu/frame（图像面代理）。全部挂在 ctx.effect 上，插件卸载会自动解绑 + 杀子进程。
+C3. 客户端半是手写的 __ModuleLoader__ 模块（无需构建/打包），通过
+    ctx.betterSidebar.registerTab 注册「VHCU 视觉」tab：状态灯 + 开启/关闭 +
+    滚动事件列表，React.createElement 写法定，不依赖 JSX。
+C4. 真实 mss 验证通过：dev harness 里 1920x1080 @8fps，单帧 diff 3.5–5ms，
+    7 秒 54 个差分事件，SSE 实时刷新；停止后 state=idle、python.exe 归零。
+C5. 已真实挂载到 desktop profile：junction + dependencies + bundles(30 项)，
+    原 profile package.json 已备份；从安装位置 import 插件、apply、dispose 均通过。
+C6. 需要一次「完全重启 DSH 桌面应用」才能看到 tab（profile bundle 只在启动时读取）。
+    重启前可先用 npm run dev 在浏览器验证同一套后端与面板。
+
+====================================================================
+1. 交付物
+====================================================================
+新增（10 个文件）：
+  dsh.plugin.json                插件描述（entry.inject=["webServer"]，client.platform="web"）
+  cordis.patch.yml               bundle 补丁（insert 一行 id=vhcu / name=dsh-vhcu）
+  lib/index.js                   host half：Supervisor 生命周期、SSE 广播、4 条路由
+  lib/client.js                  client half：__ModuleLoader__ 模块 + betterSidebar tab
+  scripts/install.mjs            挂载/卸载脚本（junction + 原子改 profile + 自动备份）
+  dev/mock-ctx.mjs               mock cordis ctx（只实现插件用到的 4 个面）
+  dev/server.mjs                 dev harness：真实 host 插件跑在 mock ctx 上 + 静态面板
+  dev/index.html                 纯 DOM 镜像面板（暗色，供挂载前验收）
+  host/test/plugin.test.mjs      3 项：路由、跨源拒绝、start→SSE diff→stop 无子进程
+  host/test/client.test.mjs      3 项：模块形状、面板渲染树、无 sidebar 时静默
+修改（覆盖前已把原文件改名为 .bak，只保留最近一份）：
+  package.json                   + dsh 清单字段 / exports["./client"] / dev+install 脚本
+  README.md                      重写为 P2 使用说明（挂载、验证、接口、边界）
+工作区外（安装脚本写入，已备份）：
+  <local-path>）
+  <local-path> → 本仓库）
+证据截图：
+  .artifacts/dev-panel-running.png（真实 mss、运行中、事件滚动）
+
+====================================================================
+2. 插件结构（DSH 如何识别）
+====================================================================
+2.1 package.json 关键字段
+  "main": "./lib/index.js"
+  "exports": { ".": "./lib/index.js", "./client": "./lib/client.js", ... }
+  "dsh": {
+     "manifestVersion": 1,
+     "bundle": { "patch": "./cordis.patch.yml" },
+     "client": { "platform": "web", "inject": [] }
+  }
+  "engines": { "node": ">=20", "dsh": ">=0.1.5-rc.1 <0.3.0-0" }
+
+2.2 dsh.plugin.json
+  entry.name = dsh-vhcu，entry.inject = ["webServer"]
+  client.platform = "web"，client.inject = []
+  （真正的 sidebar 服务依赖由 lib/client.js 的模块级 inject=["betterSidebar"] 声明，
+   避免把服务名误当 npm 包名。）
+
+2.3 cordis.patch.yml
+  - insert:
+      - id: vhcu
+        name: 'dsh-vhcu'
+  只增量插入，不替换/禁用任何核心行。
+
+2.4 挂载后宿主侧行为
+  apply(ctx) 只做三件事：
+   ① 注册 4 条路由（ctx.effect 包装）；
+   ② 注册清理钩子（ctx.effect + ctx.on('dispose')）；
+   ③ 打一行日志：dsh-vhcu: mounted (routes ...)。
+  **挂载本身不 spawn Python**（D4 按需唤醒）：只有 UI 点「开启视觉」才走 control.start。
+
+====================================================================
+3. 路由与数据格式（P2 实测）
+====================================================================
+GET /vhcu/state
+  → { ok, state:{ phase, running, pid, port, source, fps, startedAt, lastError,
+                  python, counters:{frames,diffs,errors}, clients, lastEventId },
+       events:[最近 100 条] }
+
+GET /vhcu/events（SSE）
+  首帧：event: hello  data:{state, events:[最近100]}
+  状态：event: status data:{快照}
+  事件：event: event  data:{id, ts, kind, text, level, ...}
+  心跳：每 15s 一行 ": vhcu hb <ts>"
+  断线：retry: 2000；带 Last-Event-ID 时补发环里更大的 id
+  上限：4 个并发 SSE 客户端（超出 429）
+
+POST /vhcu/control
+  头：content-type: application/json + x-vhcu: 1
+  body：{action:"start"|"stop"|"restart"|"ping"|"status"}
+  串行化：内部 queue，避免双击/并发 start 产生两个 daemon。
+  返回：{ok:true,state} 或 {ok:false,error:{code,message,hint},state}
+
+GET /vhcu/frame?x=&y=&w=&h=&maxw=
+  → image/png（代理 Python 图像面；token 留在宿主侧）
+  当前极简 UI 未用（下一步美化时加缩略图）。
+
+安全：
+  - 同源校验：Origin 与 Host 不一致 → 403；
+  - 控制路由额外要求 x-vhcu: 1（跨站表单无法构造自定义头）；
+  - SSE/控制 GET 不返回 ACAO，跨源脚本读不到内容；
+  - 路由随插件卸载自动解绑，SSE 全部 end，supervisor.stop()。
+
+====================================================================
+4. 侧边栏 UI（极简版）
+====================================================================
+lib/client.js 是手写模块，形态与官方发布产物一致：
+  window.__ModuleLoader__.load({ id:'dsh-vhcu', factory:(require)=>{ ... return module.exports; } })
+  module.exports = { name:'dsh-vhcu', inject:['betterSidebar'], apply(ctx) }
+
+apply(ctx) → ctx.effect(() => ctx.betterSidebar.registerTab({
+  id:'vhcu:monitor', title:'VHCU 视觉',
+  description:'按需视觉监控：启停、状态灯与实时差分事件流',
+  order:120, single:true, component:()=>React.createElement(Panel)
+}))
+
+Panel 只用 4 个 hook（useState/useEffect/useRef/useCallback）：
+  - 挂载：GET /vhcu/state 取初值；new EventSource('/vhcu/events') 订阅；
+  - 事件：hello/status 覆盖状态，event 前插并去重（最多 200 条）；
+  - 按钮：POST /vhcu/control，请求期间禁用，失败显示 hint；
+  - 状态灯：idle 灰 / starting 黄 / running 绿 / stopping 黄 / error 红；
+  - 列表行：HH:MM:SS + 文案（示例「检测到画面变化 · 7 个区域 · 4.67ms · 1920x1080」）。
+  - 样式全部内联 + 一个 <style id="dsh-vhcu-style">，不污染宿主 CSS；
+  - 未安装 dsh-better-sidebar 时 apply 静默返回，不拖垮客户端插件树。
+
+====================================================================
+5. 验证记录（全部真实执行）
+====================================================================
+5.1 自动化测试
+  Node：27/27 通过
+    contract 10 + supervisor 9 + integration 2 + plugin 3 + client 3
+  Python：18/18 通过
+  新增的 plugin 测试真正 spawn Python、走真实 HTTP/SSE：
+    - 挂载后 4 条路由存在、初始 phase=idle；
+    - 跨源 POST 403、缺 x-vhcu 403、未知 action 400；
+    - start → phase=running（pid>0、source∈{mss,fake}）→ SSE 收到
+      「检测到画面变化」→ stop → phase=idle → 原 pid 不再存活。
+  新增的 client 测试用 vm + React stub 加载真实 client.js：
+    - 模块形状、id、inject、tab 注册字段；
+    - 面板渲染树包含「VHCU 视觉 / 开启视觉 / 还没有事件 / SSE」；
+    - betterSidebar 缺失时不抛错。
+  这一步抓到一个真实 bug：factory 内漏了 `const module = {exports:{}}`，
+  浏览器里会直接 ReferenceError（dev 页面是 DOM 镜像，测不到）。已修。
+
+5.2 dev harness（浏览器实测，真实 mss）
+  npm run dev → http://127.0.0.1:49380/dev
+  点击「开启视觉」后：
+    源 mss，pid 14620，1920x1080，fps 7.99
+    7 秒内 54 条差分事件，单帧 diff 3.48–5.52ms
+    SSE live；页面截图 .artifacts/dev-panel-running.png
+  点击「关闭视觉」后：
+    GET /vhcu/state → {phase:'idle', running:false, pid:null, source:null}
+    tasklist 中无 python.exe
+  说明：dev harness 与插件共用同一份 lib/index.js，只有 ctx 是 mock。
+
+5.3 挂载实测
+  node scripts/install.mjs（首次用 pwsh 失败，已改为 fs.symlinkSync(...,'junction')）
+  结果：
+    - node_modules\dsh-vhcu junction 已创建
+    - profile dependencies["dsh-vhcu"]=file:<local-path>
+    - dsh.profile.bundles 含 dsh-vhcu（共 30 项）
+    - profile package.json.bak 已生成
+    - 从安装位置 import：exports dsh-vhcu / ["webServer"] / function
+    - 从安装位置 apply(mock ctx)：4 条路由注册成功，dispose 后 routes.size=0
+  尚未验证：DSH 真实启动后的客户端模块加载与 tab 渲染（必须重启，见第 6 节）。
+
+====================================================================
+6. 如何挂载与本地启动测试（照做即可）
+====================================================================
+6.1 已挂载，只差重启（本机当前状态）
+  ① 完全退出 DSH 桌面应用（不是关窗口；托盘退出/任务管理器确认进程结束）。
+  ② 重新打开 DSH。
+  ③ 打开右侧栏，点「+」菜单，应出现 **VHCU 视觉**。
+  ④ 点进去 → 点「开启视觉」→ 看到状态灯变绿、事件开始滚动。
+  ⑤ 停止：点「关闭视觉」→ 灯变灰，任务管理器无 python.exe。
+
+  宿主日志确认（DSH 日志目录）：
+    dsh-vhcu: mounted (routes /vhcu/state|events|control|frame)
+
+6.2 如果以后要从零挂到另一台机器
+  cd dsh-vhcu
+  node scripts/install.mjs --dry-run    # 先看三件事
+  node scripts/install.mjs              # junction + 原子改 profile（自动 .bak）
+  # 重启 DSH
+
+6.3 回滚
+  node scripts/install.mjs --uninstall  # 移除 junction/依赖/bundle 条目（保留 .bak）
+  # 或只用备份恢复：copy package.json.bak package.json（注意会丢掉安装后的其它改动）
+
+6.4 不重启也能验收后端 + 面板
+  npm run dev
+  # 浏览器打开 http://127.0.0.1:49380/dev
+  # 同一个 host 插件、同一套 SSE；适合改 UI/排查生命周期
+
+6.5 常见问题
+  - 看不到 tab：确认 dsh-better-sidebar 已安装；确认 profile bundles 里有 dsh-vhcu；
+    确认重启是「完全退出」；看宿主日志是否有 mounted 那一行。
+  - 点开启报 E_UNAVAILABLE：mss 未装/不可用，插件会自动退 fake；看事件里的 hint。
+  - 点开启报 E_STATE/E_TIMEOUT：daemon 卡住或上一次没退干净；点一次「关闭视觉」再开，
+    或重启 DSH（dispose 会杀子进程）。
+  - SSE 一直 retry：路由未注册（插件没加载）或被反向代理缓冲；先看 /vhcu/state 是否 200。
+
+====================================================================
+7. 已知边界与风险
+====================================================================
+R1. 客户端模块只在 vm 里验证了「模块形状 + 渲染树」，真实 DSH client loader 的加载
+    需要重启后才能确认。风险点：exports["./client"] 解析、betterSidebar 服务就绪顺序。
+    已按官方 dsh-unified-agent-memory 的产物形态逐字对齐（__ModuleLoader__ + module.exports）。
+R2. tab 依赖 dsh-better-sidebar；缺失时静默跳过（不崩，但也没有入口）。
+R3. 插件挂载后不 spawn；但一旦点过开启，Python 会常驻到点关闭或 DSH 退出（dispose 兜底）。
+R4. 差分仍是粗网格采样，真实桌面有少量误报；UI 目前只展示文本，未做 ROI 缩略图。
+R5. 没有单实例锁；不要在 profile 里重复挂同一个 bundle（route 注册会冲突）。
+R6. 安装脚本会改 profile package.json；写入前已备份，写入用 tmp+rename 并重新解析自校验。
+R7. 隐私：mss 抓的是整屏。当前只有本地 JSON 与本地 PNG，不出机器；开启按钮是显式动作。
+
+====================================================================
+8. 下一步（P3 建议）
+====================================================================
+N1. 重启后验收 tab；若 client loader 报错，按宿主日志修 exports/inject。
+N2. UI 美化：ROI 缩略图（/vhcu/frame 已就绪）、暂停/继续、源切换（mss/fake）、fps 滑杆。
+N3. 触发策略：会话 active 才允许开启 / 空闲自动停，把 D4 的「当前会话」真正接上。
+N4. 历史与审计：事件环落盘（%LOCALAPPDATA%\dsh-vhcu\logs），按会话归档。
+N5. Hear 与执行层按 P1 计划推进，复用同一条总线。
+
+====================================================================
+附录 A：本轮聊天窗口回复原文（归档）
+追加时间：2026-10-31 19:33
+====================================================================
+P2 已完成：插件壳 + SSE + betterSidebar tab + 极简暗色面板，并已挂载到 desktop profile。
+
+- 宿主半：4 条同源路由（state/events/control/frame），ctx.effect 托管，卸载自动清进程。
+- 客户端半：手写 __ModuleLoader__ 模块，ctx.betterSidebar.registerTab 注册「VHCU 视觉」，
+  状态灯 + 开启/关闭 + 滚动事件列表，无需构建。
+- 验证：Node 27/27、Python 18/18；dev harness 用真实 mss 跑出 1920x1080、
+  8fps、diff 3.5–5ms、7 秒 54 个事件；停止后无 python.exe。
+- 挂载：junction + profile 依赖 + bundles（已备份 package.json.bak）。
+- 现在只差一步：完全退出并重开 DSH，右侧栏 + 菜单里选「VHCU 视觉」。
+
+详细步骤、接口、回滚、边界见报告正文第 6/7 节。
+
+【新增】dsh.plugin.json / cordis.patch.yml / lib/index.js / lib/client.js /
+  scripts/install.mjs / dev/mock-ctx.mjs / dev/server.mjs / dev/index.html /
+  host/test/plugin.test.mjs / host/test/client.test.mjs
+【修改】package.json（package.json.bak）/ README.md（README.md.bak）
+【工作区外修改】~/.dsh/profiles/desktop/package.json（.bak）+ node_modules\dsh-vhcu junction
+
+====================================================================
+附录 B：本轮记忆写入
+====================================================================
+memory_submit：P2 挂载事实、4 条路由、27+18 测试、install 脚本用法、重启要求、
+client 模块 wrapper 的坑（漏 module 声明会在浏览器 ReferenceError）。
+（Hindsight capture 仍因未配置 apiToken 返回 401，已跳过。）
+
+（报告完）

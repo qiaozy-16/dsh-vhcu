@@ -1,0 +1,167 @@
+DSH-VHCU  P24.2-01  UI 降噪与底层注入兼容性
+生成时间：2026-11-07 13:18 (Asia/Shanghai)
+阶段：P24.2（V1.0 最后一次代码更新）
+范围：设置面板折叠/改名、剪贴板文字回退、组合键扫描码与延迟。
+版本：0.45.0
+
+====================================================================
+1. 时间 / 阶段 / 范围
+====================================================================
+  时间：2026-11-07 13:18 +08:00
+  阶段：P24.2
+  目标：
+    1. 设置面板 UI 降噪：三个折叠区块、危险区红框、危险项改名；
+    2. vhcu_type_text 支持 use_clipboard_fallback；
+    3. vhcu_key_press 支持 delay_ms，并使用扫描码发送组合键。
+
+====================================================================
+2. 本轮交付物
+====================================================================
+2.1 设置面板 UI
+    顶部灰色提示：
+      💡 建议保持默认设置。如需调整高级选项，请确保您了解其风险。
+    三个折叠区块：
+      【常规设置】默认展开：
+        - 输入法切换
+        - 听觉灵敏度
+        - 启用 Turbo 极速模式
+      【高级调试】默认折叠：
+        - 调试模式（显示原始 JSON）
+        - 显示原始转写 (仅调试用)
+        - 隐私黑名单
+      【危险区域】默认折叠、红色边框：
+        - 关闭隐私保护 (极高风险)
+        - 自动允许危险操作 (无人值守)
+    改名：
+      - 允许无保护裸奔（截图+键鼠，高危）
+        → 关闭隐私保护 (极高风险)
+      - 自动批准破坏性宏（高危）
+        → 自动允许危险操作 (无人值守)
+      - 关闭幻觉过滤（输出原始转写）
+        → 显示原始转写 (仅调试用)
+    折叠头部使用 ▾/▸ 状态；原有二次确认逻辑保留。
+2.2 文字注入多级降级
+    Python type_text(text, ime_shortcut, use_clipboard_fallback=False)：
+      - 默认仍走 Unicode 注入；
+      - use_clipboard_fallback=true 时：
+        1. 读取并备份当前剪贴板文本；
+        2. GlobalAlloc/GlobalLock/SetClipboardData 写入临时文本；
+        3. 通过扫描码发送物理 Ctrl+V；
+        4. 等待 120ms；
+        5. finally 恢复原剪贴板文本；
+      - dry-run 不触碰剪贴板，返回 clipboardFallback 标记；
+      - 剪贴板被占用时重试 6 次，仍失败返回 E_CLIPBOARD；
+      - 适配 Blender 等不接收 Unicode 注入的软件。
+    CLI input.type：
+      - 透传 useClipboardFallback。
+    Node vhcu_type_text：
+      - 新增 use_clipboard_fallback:boolean；
+      - 返回 clipboard_fallback；
+      - 文案区分“已输入”与“已通过临时剪贴板粘贴”。
+2.3 组合键扫描码与延迟
+    Python key_press(keys, delay_ms=0)：
+      - delay_ms 校验 0..1000；
+      - 记录 delayMs/scancode 到 dry-run 与真实返回；
+      - 组合键发送改为扫描码：
+        MapVirtualKeyW(vk, 0) → wScan + KEYEVENTF_SCANCODE；
+      - 有修饰键且 delay_ms>0：
+        先发送所有修饰键 keydown；
+        sleep(delay_ms)；
+        再发送主键 down/up 与修饰键 up；
+      - delay_ms=0 时一次性发送，保持低延迟。
+    CLI input.hotkey：
+      - 透传 delayMs。
+    Node vhcu_key_press：
+      - 新增 delay_ms（0..1000，默认 0）；
+      - 透传 Python，返回 delay_ms；
+      - 描述明确扫描码与 Shift+A 场景。
+2.4 测试
+    Node 97/97；
+    Python 100/100；
+    新增/更新：
+      - Python type_text 剪贴板回退 dry-run 标记；
+      - Python key_press delay/scancode dry-run 与越界拒绝；
+      - Node P5 type_text use_clipboard_fallback 返回 true；
+      - Node P5 key_press delay_ms=35 返回正确字段；
+      - UI 三个折叠区、灰色提示、新危险项名称；
+      - 原有 P24/P23 测试全量回归。
+
+====================================================================
+3. 证据
+====================================================================
+3.1 实读源码
+    lib/client.js：
+      SettingsPanel openSections 状态；
+      section() 折叠渲染；
+      vhcu-settings-tip / vhcu-settings-danger CSS；
+      三个设置区块与改名。
+    vision/vhcu_daemon/input.py：
+      _clipboard_read_text/_clipboard_write_text；
+      _paste_clipboard；
+      type_text use_clipboard_fallback；
+      key_press delay_ms；
+      _send_combo 扫描码发送。
+    vision/vhcu_daemon/cli.py：
+      input.type/input.hotkey 新参数透传。
+    lib/index.js：
+      vhcu_type_text use_clipboard_fallback；
+      vhcu_key_press delay_ms。
+3.2 实测
+    npm test：97/97；
+    py -3 -m unittest discover -s vision/tests -t vision：100/100；
+    node --check lib/index.js / lib/client.js 通过；
+    py_compile input.py / cli.py 通过。
+3.3 未实测
+    - 真实 Blender 中 Unicode 失败后剪贴板粘贴的完整链路；
+    - 真实 Shift+A / Ctrl+Shift+S 等组合键在游戏/3D 软件中的效果；
+    - 真实 Windows 剪贴板被其他程序占用/恢复失败场景；
+    - 浏览器中折叠面板的视觉与点击。
+    - 剪贴板恢复为 best effort，失败时可能保留粘贴文本。
+
+====================================================================
+4. 风险与未验证项
+====================================================================
+R1. 剪贴板回退会暂时接管系统剪贴板；若恢复失败，用户剪贴板可能残留粘贴文本。
+R2. 剪贴板被远程桌面/剪贴板管理器占用时可能 E_CLIPBOARD。
+R3. 扫描码使用 MapVirtualKeyW；极少数布局/特殊键（媒体键、部分输入法键）
+    可能仍无扫描码，此时 fallback 到 VK 发送。
+R4. delay_ms 只插入修饰键→主键之间；主键→释放之间不加延迟。
+R5. 折叠面板默认状态只在打开面板时生效；关闭面板不会持久化展开状态。
+R6. 危险区仍保留二次确认，但改名后文案风险等级更明确。
+R7. 真实 Windows 注入未在自动化测试中执行（测试为 dry-run）。
+
+====================================================================
+5. 待确认决策（编号）
+====================================================================
+D1. 三个折叠区及默认展开/折叠状态。
+D2. 危险区域使用红色边框。
+D3. 三个设置项按用户指定名称改名。
+D4. 剪贴板回退为显式参数，不自动触发。
+D5. Ctrl+V 使用物理扫描码，粘贴后恢复剪贴板。
+D6. key_press 扫描码 + 可选 0..1000ms 修饰键延迟。
+
+====================================================================
+6. 下一步计划 / 重启验证
+====================================================================
+N1. 完全退出 DSH → 重开，加载 0.45.0。
+N2. UI：
+    - 打开 ⚙；
+    - 确认顶部灰色提示；
+    - 常规设置默认展开，含输入法/听觉/Turbo；
+    - 高级调试默认折叠；
+    - 危险区域默认折叠且红色边框；
+    - 三个危险项名称已更新。
+N3. 剪贴板回退：
+    - 在 Blender 文本输入处调用：
+      vhcu_type_text {text:"...", use_clipboard_fallback:true}
+    - 文字应粘贴成功；
+    - 粘贴后检查系统剪贴板恢复原内容。
+N4. 组合键：
+    - 调用 vhcu_key_press {keys:["shift","a"], delay_ms:35}
+    - 在 Blender 中应能输入大写 A / 触发对应快捷键；
+    - 若仍失败，尝试 delay_ms 60-100。
+N5. 回归：
+    - 中键拖拽、Turbo skip_readback、100 步宏、20 队列；
+    - 软暂停、HITL、隐私硬拦截。
+
+（报告完）

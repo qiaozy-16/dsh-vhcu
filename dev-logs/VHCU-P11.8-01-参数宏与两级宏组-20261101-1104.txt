@@ -1,0 +1,235 @@
+DSH-VHCU  P11.8-01  参数化基础宏 + 两级宏组目录
+生成时间：2026-11-01 11:04 (Asia/Shanghai)
+阶段：P11.8（宏数据契约 v2、变量执行器、文件夹式 UI）
+前置：P11.5 坐标映射完成；本轮按惯例先备份代码、迁移前备份真实宏库
+
+====================================================================
+0. 结论（先看这 7 条）
+====================================================================
+C1. macros.json 升级为 version 2：新增顶层 categories[]（含 builtin 标记）；
+    宏新增 builtin 字段与 category；旧的单层 global 被迁移/清理。
+C2. 内置分类「系统基础宏」（builtin:true）随插件播种，**不可删除**；
+    其中宏为只读（不可编辑/删除），但可启用/禁用。
+C3. 三个写死宏改造成参数化基础宏：
+      macro_launch_app(app_name,text)
+      macro_create_folder(path,folder_name)
+      macro_browser_search(keyword)
+    外加 save_file；旧 open_notepad_and_type / macro_create_vhcu_folder 迁移时移除。
+C4. Python run_macro(steps, variables) 支持任意 {{name}} 多变量替换；
+    缺变量 E_PROTO；dry-run 返回 texts/variables 便于验证。
+C5. vhcu_run_macro 新增 variables 对象参数（text 仍兼容 = variables.text）；
+    宏对象返回派生 variables 列表，模型可先查参数。
+C6. UI 改为两级目录：
+      一级：宏组列表（[+ 新建宏组]；自定义组可删除；内置组无删除）
+      二级：组内宏列表（[+ 新建宏] 自动关联当前组；[← 返回组列表]）
+    宏详情沿用 steps JSON 编辑；内置宏只读，自定义宏可保存/删除。
+C7. 测试：Node 40/40、Python 45/45；真实 macros.json 已迁移并验证。
+
+====================================================================
+1. 数据契约（host/lib/macros.js）
+====================================================================
+1.1 文件结构 v2
+  {
+    "version": 2,
+    "categories": [
+      {"name":"系统基础宏","builtin":true},
+      {"name":"我的自定义宏","builtin":false}
+    ],
+    "macros": [
+      {"name":"macro_create_folder","description":"...",
+       "category":"系统基础宏","builtin":true,"enabled":true,
+       "steps":[{"op":"key","keys":["win","e"]},
+                {"op":"type","text":"{{path}}"}]}
+    ]
+  }
+1.2 常量/种子
+  BUILTIN_CATEGORY = "系统基础宏"
+  DEFAULT_CATEGORY = "我的自定义宏"
+  seedCategories(): 系统基础宏(builtin) + 我的自定义宏
+  seedMacros():
+    macro_launch_app     Win+R → {{app_name}} → Enter → 1s → {{text}}
+    macro_create_folder  Win+E → Ctrl+L → {{path}} → Enter →
+                         Ctrl+Shift+N → {{folder_name}} → Enter
+    macro_browser_search Win+R → bing → Ctrl+L → {{keyword}} → Enter
+    save_file            Ctrl+S
+1.3 迁移（load）
+  - v1 无 categories → 从宏去重生成，补 builtin；
+  - 保证两个种子分类存在；
+  - 旧宏 open_notepad_and_type / macro_create_vhcu_folder 移除；
+  - 同名内置宏（如旧 save_file[global]）升级为 category=系统基础宏、builtin=true；
+  - 清空后的 legacy global 分类移除；
+  - 缺失内置宏按 seed 补回；
+  - 有任何迁移 → persist 回写（原子写）。
+1.4 保护与 CRUD
+  - deleteCategory(builtin) → E_DENIED；
+  - deleteCategory(非空) → E_STATE（先清空）；
+  - update/remove(builtin macro) → E_DENIED；setEnabled 允许；
+  - addCategory 重名 E_CONFLICT；add 自动补分类；
+  - list() 返回派生 variables[]（正则提取 {{name}}，按首次出现顺序）；
+  - categoriesList() 返回 name/builtin/count。
+1.5 真实库迁移
+  迁移前备份：%LOCALAPPDATA%\dsh-vhcu\macros.json.bak-p10
+  迁移后验证：
+    version=2
+    categories = 系统基础宏 | 我的自定义宏
+    macros = save_file | macro_launch_app | macro_create_folder | macro_browser_search
+    （4 个均在系统基础宏，builtin=true）
+
+====================================================================
+2. 变量执行器
+====================================================================
+2.1 Python（input.py）
+  run_macro(steps, variables=None)：
+    - variables 必须 dict，≤20 项；key 匹配 [a-zA-Z0-9_]{1,40}；value 必须 str ≤2000；
+    - 对每个 type 步骤执行 re.sub(r"\{\{([a-zA-Z0-9_]+)\}\}")；
+    - 缺失变量 → E_PROTO（列出缺失名与步骤号），不会带占位符执行；
+    - dry-run 返回 {dryRun,count,steps[],texts[],variables[],elapsedMs:0}；
+    - 真实执行返回 texts/variables/elapsedMs；每步失败 E_MACRO_FAILED。
+  cli.py input.macro.run 传递 args.variables。
+2.2 Node（lib/index.js）
+  executeStoredMacro(macro,{variables})：
+    - variables 对象校验（值 String()）；
+    - 下发 {steps: macro.steps, variables}（不做 Node 侧替换，统一由 Python 执行）；
+    - 返回 macro/variables（宏声明）/texts/dry_run/elapsed_ms/steps/frame_url。
+  vhcu_run_macro(name, variables?, text?)：
+    - text 兼容旧调用 → variables.text；
+    - 宏不存在 E_NOT_FOUND、禁用 E_DENIED。
+  旧 vhcu_macro_open_notepad_and_type(text)：
+    → apply macro_launch_app with {app_name:"notepad", text}。
+2.3 示例
+  vhcu_run_macro({
+    "name":"macro_create_folder",
+    "variables":{"path":"<local-path>","folder_name":"VHCU_P118"}
+  })
+
+====================================================================
+3. UI（lib/client.js）
+====================================================================
+3.1 一级：宏组列表
+  - 打开设置默认显示所有 categories；
+  - 行：▶ + 组名 + “N 个宏 · 内置不可删除”；
+  - 点击进入二级；
+  - 自定义组右侧 🗑（stopPropagation）→ deleteCategory；
+  - 底部 [+ 新建宏组] → 输入组名 → addCategory；
+  - 同时保留调试/输入法设置与「保存设置」。
+3.2 二级：组内宏列表
+  - 顶部 [← 返回组列表]；
+  - 标题「组名 (N)」；
+  - 每行：checkbox 启停 + 宏名 + “N 步 · 描述 · 参数 x,y · 内置”；
+  - 点击进入宏详情；
+  - 底部 [+ 新建宏]：名称/描述/steps JSON，自动 category=当前组；
+  - 不提供手填分类，避免放错组。
+3.3 宏详情
+  - 内置宏：分类/描述/steps 只读，隐藏保存/删除，仅返回；
+  - 自定义宏：可改分类/描述/steps，保存修改 / 删除宏 / 返回。
+3.4 刷新
+  - GET /vhcu/macros 返回 macros+categories；
+  - 增删改组/宏后本地立即更新；
+  - 模型 vhcu_save_macro 后 macrosRevision 变化 → 打开着的设置自动重拉。
+
+====================================================================
+4. 接口
+====================================================================
+  GET  /vhcu/macros → {ok, macros[], categories[], revision}
+  POST /vhcu/macros
+    {action:"save", macro:{...}}
+    {action:"toggle", name, enabled}
+    {action:"update", name, macro:{category?,description?,steps?}}
+    {action:"delete", name}
+    {action:"addCategory", name}
+    {action:"deleteCategory", name}
+  错误码：E_CONFLICT / E_NOT_FOUND / E_DENIED / E_STATE / E_PROTO
+  其余工具/路由不变（13 tools、6 routes）。
+
+====================================================================
+5. 测试
+====================================================================
+Node 40/40（contract10 / supervisor9 / integration2 / plugin10 / client3 / macros6）
+  - macros：
+      种子 4 宏、version 2、系统基础宏 builtin；
+      自定义组 add/delete、非空拒绝删除；
+      builtin 宏 update/remove E_DENIED，setEnabled 允许；
+      variables 派生（path,folder_name / keyword）；
+      旧文件迁移默认分类=我的自定义宏。
+  - plugin：
+      GET 种子含 macro_launch_app + 两个分类；
+      P7 旧宏工具映射 macro_launch_app，variables=[app_name,text]，
+        texts 含 notepad 与输入文本；
+      P11.8：run macro_create_folder 变量替换成功、缺变量 E_PROTO、
+        deleteCategory(系统基础宏) E_DENIED、update(builtin) E_DENIED、
+        add/deleteCategory 正常。
+Python 45/45
+  - run_macro 多变量替换 texts=["<local-path>"]、variables=["a","b"]；
+  - 缺变量 E_PROTO；原有输入/IME/宏用例通过。
+
+====================================================================
+6. 重启验证
+====================================================================
+6.1 重启
+  完全退出 DSH（确认 Electron/python.exe 无残留）→ 重开 → 新会话。
+  日志：
+    dsh-vhcu: mounted (routes /vhcu/state|events|control|frame|settings|macros)
+    dsh-vhcu: registered 13 tools
+6.2 一级/二级 UI
+  1) VHCU → ⚙：应看到
+       系统基础宏 (4) · 内置不可删除
+       我的自定义宏 (0)
+     底部 [+ 新建宏组]；
+  2) 系统基础宏无 🗑；点进去看 4 个宏；无删除按钮（组级）；
+  3) 点 macro_create_folder → 详情只读，steps 含 {{path}}/{{folder_name}}；
+  4) 返回一级 → 新建 demo 组 → 进入 → 新建测试宏 → 一级出现 demo(1)；
+  5) 直接删 demo 组 → 报“分类下还有 1 个宏”；删宏后再删组成功。
+6.3 参数宏执行
+  先 vhcu_start_vision，再：
+    vhcu_run_macro("macro_create_folder",
+      variables:{"path":"<local-path>","folder_name":"VHCU_P118"})
+  预期：Win+E → Ctrl+L → <local-path> → Ctrl+Shift+N → VHCU_P118 → 回车；
+  返回 variables=["path","folder_name"]、texts 包含展开值、frame_url。
+  只传 path → E_PROTO，提示缺失 folder_name。
+6.4 旧接口
+  vhcu_macro_open_notepad_and_type("hello") 仍可用（内部 macro_launch_app）。
+
+====================================================================
+7. 文件改动
+====================================================================
+【新增】
+  VHCU-P11.8-01-参数宏与两级宏组-20261101-1104.txt（本报告）
+【修改】（覆盖前已改名 .bak）
+  host/lib/macros.js           categories/builtin/参数种子/迁移/CRUD/variables
+  lib/index.js                 categories API、add/deleteCategory、variables 执行、
+                               旧宏映射、run_macro 参数
+  lib/client.js                两级宏组 UI（组列表/组内列表/详情只读）
+  vision/vhcu_daemon/input.py  run_macro 多变量替换 + 校验
+  vision/vhcu_daemon/cli.py    传递 variables
+  vision/tests/test_input.py   多变量/缺变量用例
+  host/test/macros.test.mjs    种子 v2/保护/分组/variables
+  host/test/plugin.test.mjs    P11.8 API/参数宏用例、P7 宏名更新
+  package.json / dsh.plugin.json  0.12.0
+  README.md                    P11.8 两级 UI/参数宏/验收
+【外部数据】
+  %LOCALAPPDATA%\dsh-vhcu\macros.json  已迁移到 v2（4 内置宏 + 2 分类）
+  迁移前备份：macros.json.bak-p10
+【未改】
+  contract、runner.py、httpframe.py、install.mjs
+
+备份：lib/index.js.bak、lib/client.js.bak、host/lib/macros.js（无旧版单文件备份）、
+      input.py.bak、cli.py.bak、test_input.py.bak、macros.test.mjs.bak、
+      plugin.test.mjs.bak、package.json.bak、dsh.plugin.json.bak、README.md.bak。
+
+====================================================================
+8. 已知边界与下一步
+====================================================================
+R1. 内置宏/组只读且不可删；需要改动请新建自定义宏。
+R2. 变量只替换 type.text 的 {{name}}；无默认值/表达式/条件。
+R3. 自定义组非空不可删（防误删）；需先逐个删宏。
+R4. 坐标类宏仍受分辨率影响，优先键盘流。
+R5. 仍只支持主屏；设置（debug/IME）不持久化。
+
+P12 建议：
+  N1. 宏复制到自定义组（内置宏一键复制后编辑）；
+  N2. 组内宏拖拽移动/批量移动；
+  N3. 变量声明与默认值（variables schema）；
+  N4. 导入/导出宏组；
+  N5. 多屏坐标空间。
+
+（报告完）

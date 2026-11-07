@@ -1,0 +1,150 @@
+DSH-VHCU  P12.3.1-01  Hear 事件协议修复（真正根因）
+生成时间：2026-11-01 14:09 (Asia/Shanghai)
+阶段：P12.3.1（宿主收不到 listening；独立脚本已证明音频链路正常）
+前置：P12.3 test_hear_standalone.py 终端成功转写；宿主红灯
+
+====================================================================
+0. 结论（先看这 5 条）
+====================================================================
+C1. 真正根因不是音频线程/缓冲，而是 **daemon event schema 不接受
+    hear.status / hear.text**：
+      Supervisor 校验 event 帧时直接报 E_PROTO：
+      "$.kind: \"hear.status\" is not one of
+       [vision.started, vision.stopped, vision.diff, vision.status,
+        daemon.log, daemon.bye]"
+    事件被丢弃，所以 Node 永远收不到 listening，UI 30s 后红灯。
+C2. 同时造成 E_SEQ 序列缺口（丢弃的帧仍占用 seq）。
+C3. 修复：contract/schema/v1/event.json 的 kind 白名单加入
+    hear.status / hear.text；并增加 required 字段：
+      hear.status 必须含 status
+      hear.text   必须含 text
+C4. 现有 hear.py 本来就在音频循环前发 listening，且 _run 是独立线程；
+    没有 stdout 缓冲问题（protocol 用 os-level stdout + flush）。
+    本次不改状态机，只修协议契约。
+C5. 真机复测：直接 Supervisor 探针现在能收到
+      EVENT hear.status ... status:"listening" running:true
+    以及后续 idle；不再有 E_PROTO/E_SEQ。
+    测试：Node 46/46、Python 59/59。
+
+====================================================================
+1. 定位过程（为什么能确定是协议层）
+====================================================================
+  独立终端脚本 test_hear_standalone.py 成功：
+    frames=499 texts=1 max_rms=0.2891
+    TEXT: 香港島戰役是美軍在太平洋戰爭中贏得最痛苦的一場勝利...
+  宿主 stderr 也已经打出：
+    mic.recorder opened; capture loop started
+  说明 Python 采集/转写正常，只是 Node 没有收到状态。
+
+  用 Supervisor 直接探针（不经过 DSH UI）启动 daemon、发 hear.start：
+    ACK {"state":"loading",...}
+    STDERR [hear] ...
+    WARN protocol error {"code":"E_PROTO",
+      "message":"$.kind: \"hear.status\" is not one of [...]"}
+    WARN protocol error {"code":"E_SEQ", ...}
+    EVENT 只有 daemon.bye
+  结论：hear.status 帧在 Supervisor 的 validateFrame 阶段被拒，
+  根本没进入 index.js 的 attachSupervisor('event') 处理。
+
+  对比 test_hear_standalone.py：它不走 daemon 协议，直接 print，
+  所以不受 schema 限制——这正是“终端成功、宿主红灯”的差异。
+
+====================================================================
+2. 修复
+====================================================================
+2.1 contract/schema/v1/event.json
+    kind enum 增加：
+      "hear.status",
+      "hear.text"
+    oneOf 增加：
+      {
+        "properties": { "kind": { "const": "hear.status" } },
+        "required": ["status"]
+      },
+      {
+        "properties": { "kind": { "const": "hear.text" } },
+        "required": ["text"]
+      }
+2.2 契约测试 contract/test/contract.test.mjs
+    新增：
+      hear.status（含 status/state/running/model/modelPath）validateFrame ok
+      hear.text（含 text/durationMs）validateFrame ok
+      删除 status 后必须 invalid
+2.3 hear.py（状态发送顺序，确认无需改动）
+    _run 当前顺序：
+      loading → load_whisper_model → _set("listening") → _capture_loop
+    - listening 在音频循环之前发送；
+    - _run 由 HearService.start() 的 daemon 线程执行；
+    - 不存在“音频 while 卡住主状态机”：
+      即使 _capture_loop 阻塞，listening 已经先发出。
+    - print 均带 flush=True；protocol.send 自身 write+flush。
+    因此本次故障不是发送顺序/缓冲，而是事件被协议层过滤。
+
+====================================================================
+3. 真机复测（Supervisor 探针，不经 DSH UI）
+====================================================================
+  修复后输出：
+    EVENT hear.status {"status":"starting",...}
+    EVENT hear.status {"status":"loading",...}
+    EVENT hear.status {"status":"loading",
+      "message":"使用本地离线模型加载: ...",...}
+    EVENT hear.status {"status":"listening","running":true,
+      "offline":true,"loadedPath":"...\\models\\faster-whisper-base",...}
+    EVENT hear.status {"status":"idle",...}
+    EVENT daemon.bye
+  - 无 E_PROTO；
+  - 无 E_SEQ gap；
+  - ACK 与 EVENT 顺序正常。
+
+====================================================================
+4. 测试
+====================================================================
+Node 46/46（新增 hear 事件契约测试）
+Python 59/59（上一轮音频/离线用例保持通过）
+独立脚本 test_hear_standalone.py 已证明：
+  soundcard + webrtcvad + faster-whisper 在纯净终端可用。
+
+====================================================================
+5. 重启验证
+====================================================================
+5.1 完全退出 DSH（无 python.exe / Electron 残留）→ 重开。
+5.2 [H] Hear → 「开启听觉」
+  预期：
+    - 1-8s 内绿 listening（本地模型 1s 级）；
+    - 不再等 30s 红灯；
+    - 日志出现 audio 四步与 capture loop started；
+    - 播放系统外放音频后，[H] 出现 TEXT/转写行。
+5.3 若仍红灯：
+  查看 DSH 日志是否仍有 E_PROTO/E_SEQ；
+  若没有，则是 Node/UI 层问题，另查；
+  若仍有，确认 event schema 已更新（本版本 0.16.6）。
+5.4 转写验证：
+  播放刚才那段冲绳/香港岛战役视频，[H] 应出现文字。
+
+====================================================================
+6. 文件改动
+====================================================================
+【新增】
+  VHCU-P12.3.1-01-Hear事件协议修复-20261101-1409.txt（本报告）
+【修改】
+  contract/schema/v1/event.json   hear.status/hear.text 白名单+required
+  contract/test/contract.test.mjs 新增 hear 事件校验
+  package.json / dsh.plugin.json  0.16.6
+  README.md                       P12.3.1 根因/测试数
+【未改】
+  lib/index.js、lib/client.js、vision/vhcu_daemon/hear.py
+  （音频/线程/状态顺序已正确，本轮只修协议契约）
+【备份】
+  contract/schema/v1/event.json.bak
+  package.json.bak / dsh.plugin.json.bak / README.md.bak
+
+====================================================================
+7. 经验
+====================================================================
+  - “Python stderr 正常但 Node 没状态”优先查协议 schema/校验，
+    不要先怀疑线程或 print 缓冲；
+  - Supervisor 的 E_PROTO/E_SEQ 日志是直接证据；
+  - 独立终端脚本与宿主链路的差异，帮助把问题从音频层剥离到协议层；
+  - 新事件 kind 必须同步契约白名单，否则会被静默丢弃。
+
+（报告完）

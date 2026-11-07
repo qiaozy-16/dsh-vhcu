@@ -1,0 +1,168 @@
+DSH-VHCU  P16.2-01  短幻听过滤 + 环境音融合 + RMS 包络
+生成时间：2026-11-01 17:24 (Asia/Shanghai)
+阶段：P16.2（环境音三项精修）
+前置：P16.1 hear.audio 环境音事件完成
+
+====================================================================
+0. 结论（先看这 6 条）
+====================================================================
+C1. 短幻听过滤：切片时长 <2.0s 且文本只有
+    You/I/The/Music 等短英文词，或只有 1-2 个汉字 → 丢弃。
+C2. 时长 >=2.0s 的相同文本保留；正常中文/英文句子保留。
+C3. hear.audio 并入 FusionBuffer：同一 1.5s 窗口有视觉 + 音频时
+    modalities="both"，hear_text 含 [环境音 RMS:0.15]。
+C4. hear.audio 增加 rms_max / rms_min（按 30ms 帧统计）。
+C5. vhcu_get_hear_events 与 vhcu_get_multimodal_events 均暴露新字段。
+C6. 测试：Node 58/58、Python 79/79。
+
+====================================================================
+1. 短幻听过滤（hear.py）
+====================================================================
+1.1 常量
+      SHORT_SEGMENT_SEC = 2.0
+      SHORT_NOISE_WORDS = {
+        you, i, the, a, an, music, applause, uh, um, yeah, oh, ah, it, is,
+        to, and, of, this, that, we, he, she, they, me, my, ok, okay
+      }
+1.2 should_discard_transcript(text, duration_sec=None)
+      原有规则保留：空/纯标点/单字母/[Music]/无意义词。
+      新增：
+        if duration_sec < 2.0:
+          english = 文本中的英文字母串；
+          cjk = 文本中的汉字；
+          - english 且无 cjk 且全部在 SHORT_NOISE_WORDS → discard；
+          - cjk 且无 english 且 len(cjk) <= 2 → discard。
+      示例（duration=1.5）：
+        discard: "You" "The Music" "Music" "I" "Oh" "嗯" "好的"
+        keep:    "I think so" "You know what" "请打开设置" "你好世界"
+      duration=3.0 时 "You" 保留（按 2s 规则）。
+1.3 调用
+      _flush_segment: duration_ms = len(frames)*30
+      should_discard_transcript(text, duration_ms/1000.0)
+      被丢弃后仍按 P16.1 逻辑：若 rms >=0.01 发 hear.audio。
+
+====================================================================
+2. 环境音并入融合轴（fusion.js + index.js）
+====================================================================
+2.1 FusionBuffer
+      window 增加 audioRms / audioMax / audioMin。
+      pushAudio({ts,rms,rmsMax,rmsMin}):
+        - 与 pushVision/pushHear 同样的 1.5s 过期判断；
+        - 记录音频能量。
+      flush:
+        audio_count = 音频事件数
+        audio_rms = 平均（保留4位）
+        audio_rms_max = max(rms_max)
+        audio_rms_min = min(rms_min)
+        audioText = "[环境音 RMS:0.15]"
+        hearText = 转写文本 + audioText（换行连接）
+        modalities:
+          vision + (hear文本或音频) → both
+          仅 vision → vision
+          仅 hear/audio → hear
+        event 字段增加 audio_count/audio_rms/audio_rms_max/audio_rms_min，
+        hear/hear_text 包含 [环境音 RMS:...]。
+2.2 Node
+      hear.audio 分支：
+        note(...) 后 fusion.pushAudio({rms,rmsMax:frame.rms_max,
+                                      rmsMin:frame.rms_min})
+        armFusionTimer()
+      因此音频事件与视觉 ROI 落在同一窗口会合成一条 M 事件。
+2.3 工具
+      vhcu_get_multimodal_events 每条新增：
+        audio_count, audio_rms, audio_rms_max, audio_rms_min
+        modalities（both/vision/hear）
+      vhcu_get_hear_events 每条 hear.audio 新增：
+        rms_max, rms_min
+2.4 UI
+      [M] 融合行听觉 chip 直接显示 hear_text，例如：
+        👂 [环境音 RMS:0.15]
+      与 👁 画面变化同时出现即 both。
+      [H] 环境音行仍显示平均音量；峰值/谷值供模型读取。
+
+====================================================================
+3. RMS 包络（hear.py）
+====================================================================
+  compute_rms_stats(frames, np) -> (rms, rms_max, rms_min)
+    - 按每 30ms 帧计算 RMS；
+    - rms = 整段均方根；
+    - rms_max = 最响帧；
+    - rms_min = 最轻帧（含静音帧时接近 0）。
+  hear.audio:
+    {rms, rms_max, rms_min, duration, durationMs, reason}
+  compute_rms() 保留为 P16.1 兼容包装（返回平均）。
+
+====================================================================
+4. 测试
+====================================================================
+Node 58/58
+  - fusion.test +2：
+      视觉+音频 → modalities both、audio_count=1、audio_rms=0.15、
+      rmsMax=0.4/rmsMin=0.02、hear_text 含 [环境音 RMS:0.15]；
+      仅音频 → modalities hear、vision=null。
+  - contract hear.audio 保持；其余保持。
+Python 79/79
+  - ShortFragmentAndRmsStatsTest：
+      You/The/The Music/Music/I/Oh/嗯/好的 @1.5s → discard；
+      I think so/You know what/请打开设置/你好世界 @1.5s → keep；
+      You @3.0s → keep；
+      compute_rms_stats 静音+响帧 → rms>0.1、max>0.3、min=0；
+      空 → (0,0,0)；
+      hear.audio 带 rms_max/rms_min。
+
+====================================================================
+5. 重启验证
+====================================================================
+5.1 完全退出 DSH（无 python.exe/Electron 残留）→ 重开。
+5.2 短幻听
+  1) [H] Hear 开启；
+  2) 播放纯音乐（之前会漏 "You" 的片段）；
+  3) 预期 2 秒以内的 "You"/"The"/"Music" 不再出现为转写；
+     仍会显示 🎵 环境音行（如果有能量）；
+  4) 正常说 "I think so" 或中文短句仍应转写。
+5.3 融合
+  1) 同时开启视觉 + 听觉；
+  2) 播放有画面变化 + 音乐的视频；
+  3) [M] 融合行应出现同时包含：
+       👁 画面变化 ×N · M 个区域
+       👂 [环境音 RMS:0.15]
+     且工具返回 modalities="both"；
+  4) 只有音乐时 M 行 modalities="hear"；
+  5) 只有画面时 modalities="vision"。
+5.4 RMS 包络
+  - vhcu_get_hear_events 的 hear.audio 应含 rms_max / rms_min；
+  - vhcu_get_multimodal_events 应含 audio_rms/audio_rms_max/audio_rms_min；
+  - 爆炸声/鼓点片段应看到 rms_max 明显高于 rms_min。
+5.5 回归
+  - 幻听过滤、隐私、坐标钳制、空闲 watchdog、破坏键确认保持。
+
+====================================================================
+6. 文件改动
+====================================================================
+【新增】
+  VHCU-P16.2-01-短幻听过滤与环境音融合-20261101-1724.txt（本报告）
+【修改】
+  vision/vhcu_daemon/hear.py   SHORT_SEGMENT/NOISE、duration 过滤、
+                               compute_rms_stats、rms_max/min
+  vision/tests/test_hear.py    短片段/包络测试
+  host/lib/fusion.js           pushAudio、audio 字段、modalities、[环境音]
+  host/test/fusion.test.mjs    音频融合两个用例
+  lib/index.js                 hear.audio → fusion、工具字段/描述
+  lib/client.js                （沿用 hear_text 显示，无结构改动）
+  package.json / dsh.plugin.json 0.23.0
+  README.md                    P16.2 说明
+【备份】
+  hear.py.bak、fusion.js.bak、index.js.bak、client.js.bak、
+  package.json.bak、dsh.plugin.json.bak、README.md.bak
+
+====================================================================
+7. 已知边界
+====================================================================
+R1. 1-2 个汉字在 <2s 内会被当短幻听丢弃；真实两字短句可能被误伤。
+R2. 2 秒以上 "You" 仍可能漏出（按需求只过滤 <2s）。
+R3. rms_min 包含静音帧时接近 0，不代表“最轻音乐段”。
+R4. 音频融合只取平均 RMS 文本，不把 max/min 写进 hear_text；
+    模型需读 audio_rms_max/audio_rms_min 字段。
+R5. 真实视频的短幻听/融合节奏需重启后人工验证。
+
+（报告完）

@@ -1,0 +1,173 @@
+DSH-VHCU  P15-01  多模态时间窗口融合
+生成时间：2026-11-01 15:31 (Asia/Shanghai)
+阶段：P15（视觉 + 听觉合体）
+前置：V/H 可独立运行；P14.2 隐私与坐标钳制完成
+
+====================================================================
+0. 结论（先看这 6 条）
+====================================================================
+C1. Node 端新增 FusionBuffer：以第一个事件为锚点，1.5 秒内
+    vision.diff（ROI>0）与 hear.text 合并为一条 kind:"multimodal"。
+C2. 复合事件包含 ts/time、vision、vision_rois、hear、hear_text、
+    window_start/window_end、modalities（both/vision/hear）。
+C3. 单模态也保留：只有视觉时 hear/hear_text 为 null；
+    只有听觉时 vision 为 null、vision_rois 为 []。
+C4. 新工具 vhcu_get_multimodal_events(limit,since_id) 返回融合时间轴。
+C5. 侧边栏新增 [M] 融合 tab：时间 + 👁 视觉摘要 + 👂 语音原文 + ROI 缩略图。
+C6. 测试：Node 54/54、Python 70/70；新增融合窗口/单模态/跨窗口测试。
+
+====================================================================
+1. 融合层（host/lib/fusion.js）
+====================================================================
+1.1 FusionBuffer
+      windowMs = 1500ms
+      pushVision({ts, rois, summary}):
+        - 若当前窗口已 >=1.5s，先 flush 旧窗口；
+        - 记录 visionCount、rois（最多 12 个，保留最新）；
+      pushHear({ts, text}):
+        - 同样先判断过期；
+        - 记录 hearTexts。
+      flushIfExpired(now):
+        - only if now - window.start >= 1500 → flush。
+      flush(at, reason):
+        - vision = "画面变化 ×N · M 个区域"（无视觉则 null）；
+        - hear = 多段转写用 \n 连接（无听觉则 null）；
+        - text 摘要 = "👁 ... | 👂 ..."；
+        - 交给 onFlush 回调，窗口清空。
+1.2 窗口语义
+      - 锚点是窗口内第一条事件；
+      - 0ms 视觉 + 1.4s 语音 → 同一条；
+      - 1.5s 后才到的事件 → 旧窗口先落盘，新事件开新窗口；
+      - 只有视觉/只有听觉的窗口同样落一条 multimodal 事件，
+        通过 modalities 标记单模态。
+1.3 与原始流的关系
+      vision.diff / hear.text 仍照常进入 [V]/[H] 与 ring；
+      融合只是额外生成 multimodal，不改原始事件。
+
+====================================================================
+2. Node 接入（lib/index.js）
+====================================================================
+  - DATA_KINDS 增加 'multimodal'（Node 与前端都加）；
+  - 在 attachSupervisor 中：
+      vision.diff 且 roiCount>0：
+          fusion.pushVision({ts: now, rois}); armFusionTimer();
+      hear.text：
+          fusion.pushHear({ts: now, text: frame.text}); armFusionTimer();
+  - fusion.onFlush(event) → note('multimodal', event.text, event)
+      note 会写入 ring 并通过 SSE 推送；
+  - armFusionTimer：
+      在窗口 start+1500ms 触发 flushIfExpired，并重新 arm；
+      unref，cleanup 时 resetFusion 清定时器。
+  - 隐私/状态/动作事件不参与融合。
+
+====================================================================
+3. 融合工具
+====================================================================
+  name: vhcu_get_multimodal_events
+  params: limit(1..50, default 10), since_id
+  返回：
+    {
+      ok: true,
+      events: [{
+        id, ts:"15:20:01", ts_ms, time,
+        window_start, window_end, window_ms,
+        vision: "画面变化 ×1 · 2 个区域" | null,
+        vision_rois: [...],
+        vision_count,
+        hear: "..." | null,
+        hear_text: "..." | null,
+        hear_count,
+        modalities: "both" | "vision" | "hear"
+      }],
+      next_since_id, has_more, window_ms: 1500
+    }
+  render:
+    [15:20:01] 👁 画面变化 ×1 · 2 个区域 | 👂 叮咚声 (id=..., both)
+
+====================================================================
+4. UI
+====================================================================
+  TABS 增加：
+    { key:'multimodal', badge:'M', label:'融合',
+      hint:'同一 1.5 秒窗口内的视觉 + 听觉' }
+  counts 增加 multimodal；
+  MultimodalRow：
+    - 左侧时间；
+    - M 徽标 + 摘要；
+    - 两个 chip：👁 视觉摘要 / 👂 语音原文；
+    - vision_rois 最多 3 张缩略图（沿用 frame_url）。
+  空态：
+    “视觉 + 听觉融合时间轴 … 同一 1.5 秒窗口内的画面变化与语音转写
+     会合并成一条 M 事件”
+  自动滚动：与 Hear 一样，接近底部时跟随最新一条。
+
+====================================================================
+5. 测试
+====================================================================
+Node 54/54
+  - fusion.test.mjs（3）：
+      10.0s 视觉 + 11.2s 听觉 → 同一条，11.499s 不 flush，
+      11.5s flush 且 vision_count/hear_count/rois 正确；
+      只有听觉 → vision=null、vision_rois=[]；
+      30.0s 视觉 + 31.6s 听觉 → 先落旧窗口，新窗口从 31.6s 开始；
+      常量 1500ms。
+  - client：四个 tab（Vision/Action/Hear/融合）；
+  - plugin：注册 17 个工具；multimodal 工具空时间轴 + window_ms。
+Python 70/70（沿用 P14.2；融合只在 Node，无 Python 改动）
+  - test_input / test_privacy 等保持。
+
+====================================================================
+6. 重启验证
+====================================================================
+6.1 完全退出 DSH（无 python.exe/Electron 残留）→ 重开。
+6.2 让视觉和听觉同时工作：
+  - 开启视觉 + 开启听觉；
+  - 播放一个“画面变化 + 有声音”的视频/页面（例如带弹窗的网页视频、
+    或一边滚动页面一边播放语音）。
+6.3 看 [M] 融合 tab：
+  - 应出现 M 行，同一时间点显示 👁 + 👂；
+  - 跨 1.5s 的事件应拆成不同 M 行；
+  - 只有画面变化时该行 👂 显示“无语音转写”，
+    只有语音时 👁 显示“无视觉变化”；
+  - 缩略图可看到 ROI。
+6.4 工具：
+  - 调 vhcu_get_multimodal_events({limit:10}) →
+    返回 events，含 ts/window_start/window_end/vision_rois/hear_text；
+  - 用 since_id=next_since_id 增量拉取应只返回新事件。
+6.5 回归：
+  - [V]/[H] 原始事件仍正常；
+  - 隐私黑名单/坐标钳制/空闲 watchdog/破坏键确认不受影响。
+
+====================================================================
+7. 文件改动
+====================================================================
+【新增】
+  host/lib/fusion.js
+  host/test/fusion.test.mjs
+  VHCU-P15-01-多模态时间窗口融合-20261101-1531.txt（本报告）
+【修改】
+  lib/index.js        FusionBuffer 接入、multimodal ring/SSE、
+                      vhcu_get_multimodal_events、DATA_KINDS
+  lib/client.js       [M] 融合 tab、MultimodalRow、DATA_KINDS、
+                      Hear/M 自动滚动
+  host/test/client.test.mjs   四 tab
+  host/test/plugin.test.mjs   17 工具、multimodal 空时间轴
+  package.json / dsh.plugin.json 0.20.0
+  README.md           P15 说明
+【备份】
+  index.js.bak、client.js.bak、fusion.js.bak、
+  package.json.bak、dsh.plugin.json.bak、README.md.bak
+
+====================================================================
+8. 已知边界
+====================================================================
+R1. 融合窗口以第一条事件为锚点，固定 1.5s；不是滑动重叠窗口。
+R2. `vision` 文本是“画面变化 ×N · M 区域”，不是多模态模型生成的语义描述；
+    没有额外算力，符合“不总结”的原则。
+R3. ROI 缩略图使用原有 10 分钟签名 URL，过期后图片会失效；
+    事件字段仍保留。
+R4. 融合事件只存在 Node ring（约 200 条），不落盘；重启后清空。
+R5. 同一窗口内多帧 ROI 只保留最近 12 个。
+R6. 真实音画同步需重启后播放视频人工验证。
+
+（报告完）

@@ -1,0 +1,157 @@
+DSH-VHCU  P22.4-01  隐私侧漏硬拦截
+生成时间：2026-11-06 22:52 (Asia/Shanghai)
+阶段：P22.4（V1.0 隐私红线）
+范围：取消黑图、E_PRIVACY_BLOCKED 致命拦截、禁止 vp_* 兜底、缓存帧失效。
+版本：0.42.0
+
+====================================================================
+1. 时间 / 阶段 / 范围
+====================================================================
+  时间：2026-11-06 22:52 +08:00
+  阶段：P22.4
+  触发场景：
+    用户打开含“密码”的敏感窗口；VHCU 返回打码黑图；
+    大模型误以为 VHCU“瞎了”，触发 P21.1 兜底规则，
+    调用官方 vp_screenshot 抓取真实画面，导致隐私防护被绕过。
+  修复目标：
+    1. 取消黑图，敏感时直接抛致命 E_PRIVACY_BLOCKED；
+    2. 不生成、不缓存、不返回任何图像帧；
+    3. 旧 frame URL 在隐私触发后失效；
+    4. 所有工具 Description 增加隐私绝对红线，禁止 vp_* 兜底。
+
+====================================================================
+2. 本轮交付物
+====================================================================
+2.1 硬拦截：E_PRIVACY_BLOCKED
+    runner.capture_now：
+      - 敏感窗口且未开无保护裸奔：
+        - 不 grab 像素；
+        - 不生成黑 Frame；
+        - `_latest = None`（旧帧同步失效）；
+        - 抛出 `ProtocolError("E_PRIVACY_BLOCKED", ..., fatal=True)`。
+      - 错误 message：
+        当前处于敏感隐私窗口，VHCU 已强制拉闸。
+        请立刻停止一切视觉和操作，原地等待用户处理！
+      - hint：
+        隐私安全高于一切：禁止使用 vp_* 或任何外部截图/视觉工具兜底；
+        请直接向用户报告并暂停任务，等待用户切走敏感窗口。
+    runner._loop：
+      - 隐私触发时同样 `_latest = None`，防止 /frame 继续吐旧敏感画面。
+    HttpFrameServer：
+      - latest=None → 返回 404；旧签名 URL 不再提供任何帧。
+2.2 错误协议
+    protocol.py：
+      - ERROR_CODES 增加 E_PRIVACY_BLOCKED；
+      - ProtocolError 增加 fatal 字段。
+    cli.py：
+      - _safe_ack_error 支持 fatal，并在 ack error 中返回 fatal=true。
+    contract：
+      - error.json / ack.json 增加 E_PRIVACY_BLOCKED、fatal；
+      - contract.js ERROR_CODES 增加 E_PRIVACY_BLOCKED
+        （retryable=false）。
+    supervisor：
+      - ack error 透传 fatal，便于上层识别。
+2.3 禁止兜底（最关键）
+    VHCU_PRIORITY_PREFIX 增加：
+      【隐私绝对红线】如果 VHCU 返回 E_PRIVACY_BLOCKED，
+      绝对禁止使用 vp_* 等任何外部工具进行兜底！
+      隐私安全高于一切，请直接向用户报告并暂停任务。
+    VHCU_VISION_FALLBACK 修正：
+      只有非 E_PRIVACY_BLOCKED 的启动失败才允许 vp_screenshot 兜底；
+      E_PRIVACY_BLOCKED 时禁止任何外部工具兜底。
+    覆盖全部 23 个 vhcu_* 工具 Description。
+2.4 Node full-frame 错误路径
+    captureFullFrame：
+      - 收到 E_PRIVACY_BLOCKED：
+        - 返回 ok:false、code=E_PRIVACY_BLOCKED、fatal:true；
+        - privacy_blocked:true；
+        - 不返回 frame_url；
+        - clearFrameMeta()；
+        - state.privacy.blocked=true，UI 亮隐私横幅。
+      - 旧 black-frame 分支、privacyMasked 逻辑已删除。
+2.5 测试
+    Node 91/91；
+    Python 96/96；
+    新增/更新：
+      - Python：敏感 capture 抛 E_PRIVACY_BLOCKED、fatal=true、
+        message/hint 断言、latest_frame() is None；
+      - Python：_loop 隐私触发清空缓存帧；
+      - Python：无保护裸奔仍返回真实帧并标记 unprotected；
+      - Node：全部 23 个工具包含【隐私绝对红线】与 E_PRIVACY_BLOCKED；
+      - Node：无保护裸奔 UI/守卫测试保持通过。
+
+====================================================================
+3. 证据
+====================================================================
+3.1 实读源码
+    runner.py capture_now / _loop；
+    protocol.py ERROR_CODES / ProtocolError.fatal；
+    cli.py _safe_ack_error；
+    index.js VHCU_PRIORITY_PREFIX / captureFullFrame catch；
+    contract.js + error/ack schema；
+    supervisor.js ack fatal 透传。
+3.2 实测
+    `npm test`：91/91；
+    `py -3 -m unittest discover -s vision/tests -t vision`：96/96；
+    `node --check lib/index.js`、`node --check host/lib/supervisor.js`、
+    `py_compile runner/cli/protocol` 全部通过。
+3.3 已验证的关键行为
+    - 敏感 capture 不再返回图片；
+    - 敏感 capture 清空 latest；
+    - E_PRIVACY_BLOCKED fatal=true；
+    - 所有工具 Description 含隐私红线；
+    - 无保护裸奔仍可显式返回真实帧（高危开关）；
+    - 旧 black-frame 代码与测试已移除。
+3.4 未实测
+    - 真实敏感窗口下模型实际看到 E_PRIVACY_BLOCKED 后是否停止；
+    - 真实 vp_screenshot 是否会被模型无视红线调用；
+    - 真实旧 frame_url 在隐私触发后的 404（HTTP 层面已由 latest=None 保证）；
+    - 真实桌面端 UI 隐私横幅。
+
+====================================================================
+4. 风险与未验证项
+====================================================================
+R1. 插件无法物理禁用官方 vp_* 工具；
+    本修复只能通过“不提供任何帧 + 工具 Description 死命令 + fatal 错误”
+    阻止模型兜底；若模型完全无视指令，仍可能调用官方截图工具。
+    彻底封死需要 DSH 侧工具权限/策略禁用 vp_screenshot。
+R2. 隐私触发时清空 latest 会让任何已发出的旧 frame_url 失效；
+    这是有意行为，但 UI 缩略图/历史事件里的旧图可能仍存在内存中。
+R3. E_PRIVACY_BLOCKED 使用 ack fatal=true，不杀 daemon；
+    VHCU 继续运行以检测用户切走窗口后恢复。
+R4. 未做真实敏感窗口的端到端回归。
+R5. 无保护裸奔模式仍会完全放行（用户明确要求）。
+
+====================================================================
+5. 待确认决策（编号）
+====================================================================
+D1. 黑图彻底取消，敏感时只返回 E_PRIVACY_BLOCKED；
+D2. 隐私触发清空 _latest，旧 URL 失效；
+D3. E_PRIVACY_BLOCKED fatal=true，但不杀 daemon；
+D4. 所有工具 Description 增加隐私绝对红线；
+D5. 非隐私的启动失败仍允许 vp_screenshot 兜底；
+D6. 无保护裸奔模式保留，属于用户显式高危选择。
+
+====================================================================
+6. 下一步计划
+====================================================================
+N1. 完全退出 DSH → 重开，加载 0.42.0。
+N2. 打开含“密码”的敏感窗口 → vhcu_get_full_frame：
+    - 必须返回 E_PRIVACY_BLOCKED；
+    - 无 frame_url；
+    - message 含“强制拉闸”；
+    - UI 隐私横幅亮起。
+N3. 此时观察模型行为：
+    - 必须停止并报告用户；
+    - 不得调用 vp_screenshot。
+N4. 用旧 frame_url 再取一次：
+    - 应 404 / 无图像。
+N5. 切走敏感窗口：
+    - 重新取图应恢复。
+N6. 开启无保护裸奔模式：
+    - 截图与键鼠均放行；
+    - UI 显示“无保护裸奔模式”。
+N7. 若模型仍尝试 vp_*：
+    - 需要在 DSH 侧增加工具权限禁用策略（当前插件层无法物理阻止）。
+
+（报告完）

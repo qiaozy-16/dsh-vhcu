@@ -1,0 +1,113 @@
+DSH-VHCU  P12.3-01  纯净终端 Hear 测试脚本
+生成时间：2026-11-01 14:01 (Asia/Shanghai)
+阶段：P12.3（脱离宿主的独立音频/转写验证）
+背景：宿主内 Hear 红灯但 stderr 已到 capture loop；先确认 soundcard 在纯净
+      终端能否采集与转写，再决定是否换 pyaudiowpatch
+
+====================================================================
+0. 结论（先看这 5 条）
+====================================================================
+C1. 新增独立脚本：vision/test_hear_standalone.py
+    - 不导入 DSH/Node/状态机；
+    - soundcard 默认扬声器 Loopback → webrtcvad 切片 → faster-whisper；
+    - 结果直接 print "TEXT: ..."；
+    - 默认运行 15s（VHCU_HEAR_TEST_SECONDS 可改），到点强制退出。
+C2. 诊断输出完整：
+    - 模型根目录/离线路径；
+    - default_speaker、get_microphone、all_microphones、选中设备；
+    - 每约 1 秒输出 frames/rms/max_rms/speech_frames；
+    - 结束 summary：frames/texts/max_rms/error。
+C3. 4 秒烟测（本机、未播放音频）：
+    frames=111, texts=0, max_rms=0.0000, error=False
+    说明采集线程正常、无死锁；RMS=0 是因为系统没有播放声音。
+C4. 若播放音乐后 RMS 仍为 0 或 frames 不增长：
+    soundcard 在纯净终端也不能采集 → 按计划换 pyaudiowpatch。
+C5. 若 RMS>0 但有音频无文字：检查 VAD/设备/音量，再考虑识别参数。
+
+====================================================================
+1. 脚本路径与运行
+====================================================================
+  py -3 vision\test_hear_standalone.py
+
+  - 默认 15 秒；
+  - 可临时缩短：set VHCU_HEAR_TEST_SECONDS=5
+  - 运行前请播放音乐/视频（系统外放，不要静音/耳机独占）。
+  - 到点无论采集线程是否卡住都会 os._exit 退出，不会永久挂终端。
+
+====================================================================
+2. 脚本做什么
+====================================================================
+  1) load_model():
+       root = VHCU_MODEL_PATH 或 <plugin>/models；
+       root/faster-whisper-base/model.bin 存在 →
+         WhisperModel(abs, cpu, int8, local_files_only=True)
+       否则 HF_ENDPOINT=hf-mirror.com + download_root。
+  2) pick_loopback():
+       sc.default_speaker()
+       sc.get_microphone(id=speaker.id/name, include_loopback=True)
+       sc.all_microphones(include_loopback=True)
+       选 isloopback 或名称匹配的麦克风，打印设备名。
+  3) capture():
+       samplerate=16000, channels=1, 30ms/480 samples；
+       每帧转 int16，计算 RMS；
+       每 33 帧打印一次 frames/rms/max_rms/speech_frames；
+       webrtcvad(2) 判语音；0.3s 预录；静音≥0.8s 且语音≥0.3s 切片；
+       切片同步 transcribe（beam_size=1, vad_filter=False），
+       有文本 print "TEXT: ..."。
+  4) main():
+       主线程等待 15s（或线程自己到 deadline），set stop，join 3s；
+       若线程仍未退出，打印警告并 os._exit，避免 C 线程卡死终端。
+
+====================================================================
+3. 本机 4 秒烟测（未播放音频）
+====================================================================
+  VHCU_HEAR_TEST_SECONDS=4 py -3 vision/test_hear_standalone.py
+  关键输出：
+    ʹ�ñ�������ģ��: ...\models\faster-whisper-base (local_files_only=True)
+    whisper model loaded
+    default_speaker = '... (Realtek(R) Audio)'
+    all_microphones count = 4
+    selected loopback = '... (Realtek(R) Audio)'
+    mic.recorder opened; capture loop started
+    frames=33 rms=0.0000 ...
+    frames=66 rms=0.0000 ...
+    frames=99 rms=0.0000 ...
+    capture ended: frames=111 texts=0 max_rms=0.0000
+    summary: frames=111 texts=0 max_rms=0.0000 error=False
+  解释：
+    - 采集线程正常，无死锁；
+    - 没有播放声音，所以 RMS=0、无转写；
+    - 中文在部分终端可能显示乱码，属控制台编码，不影响逻辑。
+
+====================================================================
+4. 判读
+====================================================================
+  A. frames 持续增长、max_rms>0、TEXT 出现 → soundcard 在终端完全可用；
+     宿主问题在 Node/状态/进程层，再回宿主排查。
+  B. frames 增长但 max_rms=0 → 默认设备没有声音/静音/独占/静音混音；
+     换默认播放设备或播放音乐重试。
+  C. frames 不增长、停在 mic.recorder/record → soundcard 采集死锁；
+     可以确认换 pyaudiowpatch。
+  D. frames 增长、rms>0 但无 TEXT → VAD 灵敏度/音量/语言；不是采集死锁。
+
+====================================================================
+5. 文件改动
+====================================================================
+【新增】
+  vision/test_hear_standalone.py        独立 Hear 测试脚本
+  VHCU-P12.3-01-纯净Hear终端测试-20261101-1401.txt（本报告）
+【未改】
+  lib/、hear.py、package 版本（本轮只加独立诊断脚本）
+
+====================================================================
+6. 下一步
+====================================================================
+  用户运行脚本并反馈：
+    - frames 是否增长；
+    - max_rms 是否 >0；
+    - 是否出现 TEXT。
+  若 C（采集死锁）→ 立即换 pyaudiowpatch 重写 capture 层；
+  若 A（终端正常）→ 回宿主排查 Node 事件/状态/进程清场；
+  若 D → 调 VAD/音量。
+
+（报告完）

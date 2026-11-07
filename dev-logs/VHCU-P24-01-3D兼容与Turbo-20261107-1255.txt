@@ -1,0 +1,177 @@
+DSH-VHCU  P24-01  3D 软件兼容与高效宏执行补丁
+生成时间：2026-11-07 12:55 (Asia/Shanghai)
+阶段：P24（3D 软件兼容 + 高效宏执行）
+范围：中键拖拽原语、宏 100 步/队列 20、Turbo skip_readback。
+版本：0.44.0
+
+====================================================================
+1. 时间 / 阶段 / 范围
+====================================================================
+  时间：2026-11-07 12:55 +08:00
+  阶段：P24
+  目标：
+    1. 新增鼠标中键拖拽原语，适配 Blender/CAD 视角旋转；
+    2. 宏上限 30 → 100，macros_queue 10 → 20；
+    3. Turbo 极速模式：允许在 run_macro / key_press / mouse_click
+       上传 skip_readback:true，跳过强制回读。
+
+====================================================================
+2. 本轮交付物
+====================================================================
+2.1 鼠标中键拖拽
+    Python input.py：
+      - 新增 MOUSEEVENTF_MIDDLEDOWN=0x0020、
+        MOUSEEVENTF_MIDDLEUP=0x0040；
+      - InputController.middle_drag(x1,y1,x2,y2)：
+        - 移动至起点；
+        - MIDDLEDOWN；
+        - 16 步平滑绝对移动（8ms/步）；
+        - finally 保证 MIDDLEUP；
+        - dry-run 返回 action=middle_drag/from/to；
+        - 坐标钳制与越界 warning。
+      - 宏执行 _run_step 支持 op=middle_drag；
+      - _MOUSE_COORDS 支持 middle_drag；
+      - run_macro 步骤上限同步为 100。
+    CLI：
+      - 新增 input.middle_drag 命令分发。
+    Contract：
+      - CMD_OPS 增加 input.middle_drag。
+    Node：
+      - 注册第 24 个工具 vhcu_mouse_middle_drag(x1,y1,x2,y2,
+        is_relative_to_image)；
+      - 相对坐标按最近一次 vhcu_get_full_frame 的 scale_factor 换算；
+      - 返回 from/to/requested/is_relative_to_image/scale_factor；
+      - 加入 VHCU_VISUAL_ACTION_TOOLS，自动带视觉确认规则。
+    Macro：
+      - STEP_OPS 增加 middle_drag；
+      - normalizeSteps 支持 middle_drag 四坐标；
+      - vhcu_save_macro 描述加入 middle_drag。
+2.2 宏步数与队列上限
+    - MAX_STEPS 30 → 100（host 与 Python 同步）；
+    - macros_queue 1..10 → 1..20（执行器与工具 schema 同步）；
+    - MacroRecorder DEFAULT_MAX_STEPS 30 → 100；
+    - 录制进度显示 N/100，达到 100 步显示明确警告；
+    - 前端导入校验 >30 → >100；
+    - vhcu_save_macro steps maxItems 30 → 100；
+    - vhcu_start_recording 描述 30 → 100；
+    - 旧 macros.json 中 101+ 步宏迁移策略保持：保留前 100 步并持久化，
+      不把文件当损坏。
+    - README/package 描述同步为 100-step、24 tools。
+2.3 Turbo 极速模式
+    设置：
+      - settings.turboMode 默认 false；
+      - ⚙ 新增「启用 Turbo 极速模式」；
+      - UI 提示：
+        开启后速度大幅提升，但在极不稳定的界面可能因缺乏回读而产生误操作。
+    参数：
+      - vhcu_mouse_click 增加 skip_readback:boolean；
+      - vhcu_key_press 增加 skip_readback:boolean；
+      - vhcu_run_macro 增加 skip_readback:boolean（队列同样生效）。
+    逻辑：
+      - 只有 settings.turboMode=true 且参数 skip_readback=true 才生效；
+      - Turbo 关闭时传 skip_readback 会被忽略，仍强制回读；
+      - runInputAction(skipReadback=true) 不调用 markActionPending；
+      - click/key 响应返回 skip_readback:true 且不再给 verify；
+      - run_macro 跳过自动全屏校验，返回 frame_url:null、
+        verify:{ok:false,skipped:true,reason:'turbo-skip-readback'}；
+      - macros_queue 的 Turbo skip 不会因 verify.skipped 误判失败。
+2.4 测试
+    Node 97/97；
+    Python 98/98；
+    新增/更新：
+      - Python middle_drag dry-run/钳制/warning；
+      - Python run_macro middle_drag 与 101 步拒绝；
+      - Node P5 中键拖拽相对坐标映射；
+      - Node P5 Turbo：
+        - Turbo on + skip_readback key/click 不产生回读门；
+        - Turbo off + skip_readback 仍被下一次动作 E_STATE 拦截；
+      - Node P11.9 Turbo 宏跳过自动校验、frame_url=null；
+      - Node P11.9 macros_queue 21 个返回 E_PROTO；
+      - macros/recorder 100 步默认值与迁移；
+      - client UI Turbo 文案、100 步文案；
+      - 工具注册数 24。
+
+====================================================================
+3. 证据
+====================================================================
+3.1 实读源码
+    vision/vhcu_daemon/input.py：
+      MOUSEEVENTF_MIDDLEDOWN/UP、middle_drag、macro middle_drag、
+      run_macro 1..100。
+    vision/vhcu_daemon/cli.py：
+      input.middle_drag 分发与 expectedForeground。
+    lib/index.js：
+      vhcu_mouse_middle_drag 工具；
+      executeStoredMacro skipReadback；
+      executeMacroQueue 1..20/skipReadback；
+      runInputAction skipReadback 门；
+      turboMode 设置默认/merge。
+    lib/client.js：
+      Turbo 复选框与警告文案；
+      100 步录制/导入 UI。
+    host/lib/macros.js：
+      MAX_STEPS=100、middle_drag、旧宏迁移。
+    host/lib/recorder.js：
+      DEFAULT_MAX_STEPS=100。
+3.2 实测
+    npm test：97/97；
+    py -3 -m unittest discover -s vision/tests -t vision：98/98；
+    node --check lib/index.js / lib/client.js 通过；
+    py_compile input.py / cli.py 通过。
+3.3 未实测
+    - 真实 Blender/CAD 中键旋转视角的端到端；
+    - 真实 100 步宏与 20 宏队列的完整执行；
+    - 真实 Turbo 连续按键建模的稳定性；
+    - 真实 UI 的 Turbo 文案与 24 工具列表。
+
+====================================================================
+4. 风险与未验证项
+====================================================================
+R1. Blender 中键行为取决于软件配置；若用户把 orbit 改成其他键，
+    需要额外配置或宏。
+R2. 中键拖拽固定 16 步、8ms/步；极高刷新率/远程桌面下可能不够平滑。
+R3. Turbo 只对 run_macro/key_press/mouse_click 开放 skip_readback；
+    其他动作仍强制回读。
+R4. Turbo 跳过宏自动全屏校验后，队列仍会继续执行后续宏；
+    若中间界面异常，可能连续误操作，需要模型主动在关键节点回读。
+R5. 100 步宏执行时间更长，Node 单宏 timeout 仍为 30000ms；
+    极慢步骤可能超时。
+R6. 旧宏 101+ 步仍会被截断到 100 步。
+R7. 真实桌面端未验证。
+
+====================================================================
+5. 待确认决策（编号）
+====================================================================
+D1. 中键拖拽使用 16 步插值、8ms/步、保证 MIDDLEUP。
+D2. 新工具支持 is_relative_to_image，并作为第 24 个工具。
+D3. 宏上限 100，队列上限 20。
+D4. Turbo 默认关闭，仅对指定三工具开放 skip_readback。
+D5. Turbo 宏跳过自动全屏校验，返回 skipped 标记。
+D6. Turbo 关闭时 skip_readback 被忽略，仍强制回读。
+
+====================================================================
+6. 下一步计划 / 重启验证
+====================================================================
+N1. 完全退出 DSH → 重开，加载 0.44.0。
+N2. 验证中键拖拽：
+    - 打开 Blender；
+    - 取全屏 vhcu_get_full_frame；
+    - 调 vhcu_mouse_middle_drag，传图片坐标 +
+      is_relative_to_image=true；
+    - 观察视角是否平滑旋转；
+    - 宏中测试 {"op":"middle_drag","x1":...}。
+N3. 验证 100 步/20 队列：
+    - 保存 100 步宏应成功；
+    - 101 步应 E_PROTO；
+    - 20 个宏队列应开始执行；
+    - 21 个应 E_PROTO。
+N4. 验证 Turbo：
+    - ⚙ 开启 Turbo，保存；
+    - vhcu_mouse_click skip_readback:true 后立刻再 click，
+      不应 E_STATE；
+    - vhcu_run_macro skip_readback:true 返回 frame_url:null；
+    - 关闭 Turbo 后，同样参数仍会要求回读。
+N5. 回归 P23/P23.1：
+    - 软暂停、HITL 审批、自动批准、隐私硬拦截。
+
+（报告完）

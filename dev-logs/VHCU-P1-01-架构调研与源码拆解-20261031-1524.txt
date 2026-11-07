@@ -1,0 +1,640 @@
+DSH-VHCU  P1-01  架构调研与源码级拆解报告
+生成时间：2026-10-31 15:24 (Asia/Shanghai)
+阶段：P1 拆解分析（不写实现代码，只给结论与决策）
+作者：DeepSeek（Team Lead）
+输入：VHCU架构白皮书.txt（5 条铁律）、记忆库检索结果、GitHub 源码、本机已装 DSH 插件源码
+
+====================================================================
+0. 结论摘要（先看这 8 条）
+====================================================================
+C1. 白皮书的 5 条不是 5 个功能，而是 1 条主链 + 4 个约束：
+    「按需唤醒」是总闸门；Vision/Hear 是两条感知支路；执行层是唯一出口；
+    UI 只是这条链的观测面。任何模块如果绕开总闸门自己定时器空转，就是架构违规。
+
+C2. 数据总线不要照搬 dsh-island 的「HTTP+SSE 一条通道」。
+    island 是 Node 服务端 + 渲染层客户端（同进程树里的浏览器），没有第二个操作系统进程；
+    VHCU 是 Node 父进程 + Python 子进程，控制流方向相反。
+    推荐 VH-Bus v1：控制面走 stdio NDJSON（父子管道），图像面走 loopback HTTP 按需拉取，
+    UI 面走 DSH 自带 webServer 的同源 SSE。三车道分离，各自只做一件事。
+
+C3. Python 子进程的僵尸问题，80% 不靠 Node 杀，靠 Python 自杀：
+    Python 侧 parent-pid 看门狗（父死即退）+ finally 杀自己的 ffmpeg/whisper 子进程；
+    Node 侧只做「有界等待 → SIGTERM → taskkill /T /F」三段式兜底。
+    只 kill 自己持有的 ChildProcess 且 exitCode === null 的句柄，绝不按 pid 盲杀。
+
+C4. UI 不要再造一个 Electron 窗口。DSH 生态已有官方扩展点：
+    ctx.betterSidebar.registerTab(...) + ctx.webServer.register(...)（本机 dsh-better-sidebar 0.28.0 实证）。
+    直接做原生侧边栏 tab，同源、免鉴权、免端口发现、免 endpoint.json。
+    这同时消灭了 island 曾经踩过的「窗口先加载、endpoint 后写出 → 永久未连接」整类 bug。
+
+C5. 第一步不是 UI，也不是 ASR，是「契约 + 守护 + 假感知 → 真差分」的垂直切片（P0 三件套）。
+    理由：契约不可逆、进程生命周期风险最高、差分性能是 V1 最大技术风险，三者都必须在写 UI 前拿到真实数据。
+
+C6. 视觉链的性能瓶颈不在 diff，在「每帧全屏 PNG 编码/传输」。
+    正确做法：DXGI/BitBlt 抓 BGRA → 直接 numpy 切片降采样 → ROI 内 absdiff → 只发脏矩形 JSON；
+    图像只在「UI 预览 / 模型需要看局部」时按需拉取，且永不进入模型 API（白皮书第 2 条）。
+
+C7. Hear 不要做「常开麦克风 + 流式 whisper」。faster-whisper 本身不是流式引擎，
+    正确姿势是：常驻模型 + VAD 端点检测切段 + 段级转写（beam_size=1、condition_on_previous_text=False），
+    双音源在采集层混音或择一，转写结果作为事件进同一条总线。
+
+C8. 本机网络约束会影响后续协作：raw.githubusercontent.com / github.com / jsdelivr 均不可用，
+    只有 api.github.com 可解析且匿名 60 次/小时。本次调研已按此约束执行（见第 7 节证据与局限）。
+
+====================================================================
+1. 记忆检索结果（本轮实际命中的事实，及它对设计的修正）
+====================================================================
+检索方式：memory_status / memory_search(hybrid) / memory_show(常用路径与环境) /
+          obsidian_search(dsh-island) / 本机插件源码直读。
+
+1.1 命中且直接约束本轮设计的事实
+  M1) dsh-island 已结项（2026-10-25 23:28 用户验收通过），技术底座可复用：
+      - 通信：loopback HTTP + SSE；listen(0) 让系统分配端口；EADDRINUSE 重试 5 次；
+        token 经 sha256 定长化后 timingSafeEqual 比较；SSE 每 15s 心跳；SSE 客户端上限 4；
+        C1 帧上限 4096 字节、C2 请求上限 8192 字节。
+      - 守护：spawn 时硬删除 ELECTRON_RUN_AS_NODE（否则子进程退化成 Node，窗口静默不出现）；
+        detached:false（避免宿主崩溃留孤儿）；退避 500ms→30s；窗口期内连续失败熔断；
+        优雅退出等待 3s；stdout/stderr 有界（80 行 × 500 字符）；READY_MARKER 就绪门。
+        源码：dsh-island/lib/host/bridge.js、dsh-island/lib/host/supervisor.js。
+  M2) 曾发生过的真实故障与根因（本次必须提前规避）：
+      - 「未连接」：渲染层只在启动读一次 endpoint.json，窗口先于桥就绪 → 永久未连接。
+        修正：任何「端点发现」都必须可重试、可重建，或干脆消灭发现（见 C4）。
+      - 「指标全空」：cordis 中访问未声明 inject 的服务会直接抛异常，不是返回 undefined；
+        正确取可选服务是 ctx.reflect.get(name, strict)。
+      - 定时器泄漏会把进程吊住不退出：兜底定时器必须 unref；
+        但「等待重启」这类真实待办**不能** unref（island supervisor 注释里明确写了这条取舍）。
+      - 改 profile package.json 必须 JSON.parse/stringify + 临时文件 rename 原子写 + 备份 + 写后自校验，
+        禁止正则替换/文本追加（用户曾因漏逗号导致整个环境崩溃）。
+  M3) 热更新通道已真实验证：node scripts/restart-shell.mjs 写 ~/.dsh/island/restart.signal，
+      宿主 2 秒内消费并重启窗口，宿主 pid 不变。改 island.html / shell/*.cjs 应走它，不要杀进程。
+      → VHCU 的 UI 热更新可复用同一思路（watch 文件 + 信号），但 Python 侧必须走「重启子进程」而不是信号。
+  M4) DSH 投影/事件语义：会话投影投递形状为 {kind:'sequenced'|'cached', asOfSeq, values}，
+      values 是增量合并（缺键保持旧值），不是全量替换。
+      → VHCU 总线帧也采用「seq + 增量字段」语义，UI 侧只 patch 不重绘，天然支持断线续传。
+  M5) 环境事实：本机 DSH 插件装在 <local-path>；
+      dsh-vision-router 3.0.4、dsh-unified-agent-memory、dsh-better-sidebar 0.28.0 均可直读源码（本轮已读）。
+      Windows 上 mklink /J 通过 bash 传参会报「无效开关」，用 PowerShell New-Item -ItemType Junction。
+  M6) 项目工作流（用户长期规则）：每一轮对话把本轮产出总结成一份带时间戳的 .txt（工作区根目录）；
+      聊天窗口只回要点，不重复展开。本文件即该规则的执行。
+
+1.2 检索到的「过时/需注意」信息
+  - 记忆里同时存在两条关于灵岛项目阶段的记录（「P1 第 1 步，7 项决策未确认」与「已结项」）。
+    以时间更晚的「已结项 + 验收通过」为准；前一条是历史快照，不作为现状。
+  - 记忆称 cua-driver-native 的 element_token/snapshot_id 不在工具可见输出里，只能坐标点击。
+    这是 DSH 宿主/插件版本相关的现象，若 VHCU 未来依赖它做「视觉寻址兜底」，必须先复测，不能当契约。
+
+1.3 记忆对本次架构的三个直接修正
+  R1. 不要为 VHCU 再写一套 endpoint.json + token + 端口发现（那是 island 在没有宿主 webServer 时的权宜）。
+      VHCU 是 DSH 插件，直接住在宿主的 webServer 里（同源），端点发现问题从根上消失。
+  R2. 父子进程守护的「隐形坑」是环境变量继承（ELECTRON_RUN_AS_NODE）与孤儿进程（detached），
+      不是 kill 本身。Python 守护要把这两条写进代码注释和测试用例。
+  R3. 熔断 + 手动恢复必须第一天就有。用户环境的稳定性优先于功能完整度：
+      视觉挂了，DSH 必须照常可用，且 UI 要明确显示「视觉不可用（原因）+ 一键重启」。
+
+====================================================================
+2. 源码级拆解：多模态 / Computer Use 框架
+====================================================================
+说明：以下每条尽量标注「可核实事实（文件/行为）」与「推断（优劣势判断）」。
+      仓库解析经 api.github.com（本机唯一可达通道），文件已落盘到 %TEMP%\vhcu\src 供复核。
+
+2.1 Agent TARS（bytedance/UI-TARS-desktop，~39.5k stars，TypeScript/Electron）
+  可核实事实：
+  - 桌面操控在 Electron 主进程内完成：apps/ui-tars/src/main/agent/operator.ts
+    · 继承 NutJSOperator（@computer-use/nut-js 原生输入），动作空间是文本 DSL：
+      click(start_box='[x1,y1,x2,y2]') / left_double / right_single / drag / hotkey / type /
+      scroll / wait / finished / call_user。
+    · screenshot() 用 Electron desktopCapturer.getSources({types:['screen']})，
+      按 logicalSize 取缩略图，再 resize 到 physicalSize；scaleFactor 在 macOS 被强制为 1。
+    · 坐标框 [x1,y1,x2,y2] 由 SDK 的 parseBoxToScreenCoords 换算成屏幕坐标。
+  - 运行编排：apps/ui-tars/src/main/services/runAgent.ts
+    · new GUIAgent({...})，onData 回调里把每步的 screenshotBase64 / predictionParsed /
+      screenshotContext 写回 renderer 状态（setState）；abortController.signal 全程透传用于取消。
+    · 每步用 markClickPosition 在截图上画 SoM（Set-of-Mark）标记，再用 ScreenMarker 窗口在屏幕上
+      显示预测位置 —— 这是「可解释的自动化」，也是调试利器。
+  - 远程/沙箱：apps/ui-tars/src/main/remote/operators.ts
+    · RemoteComputerOperator 继承同一个 Operator 抽象，screenshot() 调 remoteComputer.takeScreenshot()，
+      execute() 通过 ProxyClient 把动作发给远端；本地与远端对上层完全同构。
+  - Agent 侧：multimodal/agent-tars/core/src/agent-tars.ts
+    · environment.initialize((tool) => this.registerTool(tool), this.eventStream)：环境负责注册工具、
+      发事件；onEachAgentLoopStart / onBeforeToolCall / onAfterToolCall 全部委托给 environment。
+    · 支持 AIO（all-in-one）沙箱环境与本地环境两套实现，事件流（eventStream）是 UI 的唯一数据源。
+  推断（优劣势）：
+  + Operator 抽象（screenshot/execute 两方法）是本项目最值得抄的一层：把「感知」与「动作」钉死成
+    可替换接口，本地 nut-js、远端代理、浏览器三种实现同一套上层逻辑。
+  + 事件流 + 环境委托，使 UI 只消费事件，不反向驱动业务。
+  - 每个 step 都截全屏并编码 PNG/base64（operator.screenshot 每步调用），没有 I/P 帧差分；
+    截图成本与 token 成本都落在每一步上。VHCU 白皮书第 2 条正是针对这一点。
+  - 原生输入跑在主进程内：nut-js 抛错/卡死会直接影响 Electron 主进程；没有独立守护进程。
+  - 主循环在 @ui-tars/sdk（npm 包，不在本仓源码内），本仓只能核实 operator 与编排，不能核实循环细节。
+  → 对 VHCU 的启示：抄 Operator 抽象 + 事件流；不抄「每步全屏截图」与「主进程内输入」。
+
+2.2 InfantAgent-Next（GitHub 现为 bin123apple/InfantAgent，Python；infant/ 包）
+  可核实事实：
+  - infant/computer/computer.py（~71KB）不是「本机操控」，而是「远程沙箱操控」：
+    · 依赖 Docker 容器 + xrdp + guacd + Guacamole Web（:8080/guacamole），代码里直接 apt-get 安装
+      xrdp/xorgxrdp/guacd、写 user-mapping.xml、起 guacd/xrdp-sesman/xrdp 进程；
+    · 执行通过 SSH：__ssh_login / start_ssh_session / execute() / _send_interrupt()；
+    · 有 find_available_tcp_port / restart_docker_container / close 等生命周期方法。
+  - infant/agent/agent.py：视觉 grounding 把图像描述转坐标，响应里用正则抽 data:image/...;base64
+    的截图，extract_image_from_response，再 backup_image_memory 存记忆。
+  推断：
+  + 隔离性好：所有动作发生在容器/VM 内，宿主机风险低；可复现、可回滚。
+  - 重：Docker + xrdp + Guacamole 三层，冷启动与画面延迟都以秒计；对「本机 60fps 差分」完全不适配。
+  - 把「基础设施编排」写进了业务类（computer.py 里装包、改配置），可测试性差。
+  → 启示：VHCU 若将来要「安全执行」，应把沙箱做成可插拔后端；V1 不要引入 VM。
+
+2.3 OS-Copilot（OS-Copilot/OS-Copilot，~1.8k stars，Python）
+  可核实事实：
+  - 架构是「code-as-action」：LLM 生成 Python 代码，代码调用工具库里的函数。
+    · oscopilot/modules/executor/friday_executor.py：executor 持有 tool_manager，生成/保存工具，
+      @api_exception_mechanism(max_retries=3) 包裹 API 工具调用。
+    · oscopilot/tool_repository/manager/tool_manager.py：工具元数据落 JSON，导出 openapi.json，
+      get_open_api_description_pair() 供 LLM 选择工具。
+    · oscopilot/environments/：base_env（timeout=300、working_dir、step/stop/terminate 生命周期），
+      另有 bash_env / subprocess_env / py_jupyter_env / applescript_env。
+  - self_learning 模块把可复用操作沉淀成新工具（generated_tools）。
+  推断：
+  + 工具可扩展性最强：任何能写成 Python 的动作都能成为工具；自学习闭环是差异化。
+  - 安全边界最弱：执行 LLM 生成的任意代码；生成工具的质量/副作用不可控。
+  - 感知是「工具调用式」而非「连续视觉流」；没有帧差分、没有 ROI、没有屏幕状态机。
+  - 环境抽象有 stop/terminate，但 base_env.terminate() 是空实现，实际清理依赖子类 —— 生命周期契约弱。
+  → 启示：VHCU 执行层可以保留「宏 + 代码工具」两种粒度，但必须默认禁用任意代码执行，
+    并把 terminate 写成强制契约（不是可选 override）。
+
+2.4 Qwen-Agent（QwenLM/Qwen-Agent，~17k stars，Python）
+  可核实事实：
+  - 核心是函数调用循环：qwen_agent/agents/fncall_agent.py 用 MAX_LLM_CALL_PER_RUN 限制单轮 LLM 调用数，
+    工具来自 function_list（字符串/字典/BaseTool 实例）。
+  - MCP 管理：qwen_agent/tools/mcp_manager.py
+    · 支持 stdio / sse / streamable-http 三种 MCP 传输；独立 asyncio loop 线程；
+    · 关键工程手段：monkey-patch mcp.client.stdio._create_platform_compatible_process，
+      把每个 MCP 子进程登记进 self.processes；退出时优雅清理，超时后对残留进程 terminate()。
+  - 代码执行：qwen_agent/tools/python_executor.py 用多进程池 + timeout（默认 20s）执行代码片段。
+  - 视觉局部放大工具（qwen_agent/tools/image_zoom_in_qwen3vl.py）存在，说明「先裁再看」是官方实践。
+  推断：
+  + 工具协议（JSON Schema）+ MCP 生态是最大资产；跨语言工具接入成本低。
+  + 子进程登记表 + 超时 terminate 是「防僵尸」的标准答案，可直接抄思路。
+  - 没有桌面捕获/输入注入：Computer Use 要靠外部 MCP server；本身不是 GUI agent 运行时。
+  - python_executor 的 timeout 是「进程池 future 超时」，不是硬杀，长任务仍可能泄漏（源码注释也承认）。
+  → 启示：MCP 可以作为 VHCU 的「工具接入层」，但不要作为「感知/执行主链路」；
+    子进程登记表必须实现，且要比它更硬（OS 级 kill）。
+
+2.5 横向对比（针对 VHCU 的 4 个维度）
+  维度            Agent TARS        InfantAgent      OS-Copilot      Qwen-Agent
+  感知方式        每步全屏截图      远程桌面画面     工具调用/代码   工具调用（可裁图）
+  输入注入        进程内 nut-js     容器内 SSH       代码/AppleScript 依赖外部 MCP
+  进程隔离        无（同 Electron） 强（Docker/VM）  弱（同进程）    中（MCP 子进程）
+  生命周期        事件流 + abort    容器启停         弱契约          登记表 + terminate
+  帧差分/ROI      无                无               无              局部放大（非差分）
+  延迟量级        100ms~1s/步       秒级             秒级            取决于工具
+  可复用点        Operator 抽象    沙箱可插拔思路   工具沉淀         子进程登记 + MCP
+
+====================================================================
+3. 源码级拆解：DSH 生态插件（状态管理与生命周期）
+====================================================================
+3.1 dsh-vision-router 3.0.4（本机 <local-path>）
+  可核实事实：
+  - 入口 index.js（229KB）是「轮次级视觉路由」：含图片的 turn 整体走视觉模型，其余 turn 保持原模型；
+    失败按 provider/model 链回退；提供 vision_describe 按需工具（1-4 张图，本地文件或会话附件）。
+  - 状态管理：
+    · 按 session 的 WeakMap：turnState = new WeakMap()、structuredBootstrapTurnState = new WeakMap()
+      （index.js:2206-2207、659）—— 以会话对象为键，会话销毁即回收，天然无泄漏。
+    · 适配器层用 WeakMap 缓存包装结果（lib/adapter-update-coalescer.js:78-136），
+      并用 Map 做函数级绑定缓存；ctx 包装也走 WeakMap（wrappedContexts）。
+    · 合并器 coalesced(...)（同文件 227 行）：高频更新合并成一次，避免 UI/宿主抖动。
+    · 结果缓存：sharp 降采样 + 按「内容哈希 + 问题」缓存（index.js 头部注释）。
+  - 生命周期：
+    · 全部资源挂在 ctx.effect(() => ...) 上（index.js:2182、4725、4734、4753；4849 settings source），
+      返回 disposer 由 Cordis 统一回收；
+    · 可中止：AbortSignal 全程透传，throwIfVisionTaskAborted 统一抛 AbortError；
+    · 延迟注册：老 Host 无 webServer 时走 ctx.inject() 延迟注册路径（cordis.patch.yml 注释）。
+  - 兼容策略：cordis.patch.yml 只做「增量补丁」，不替换/禁用核心行；对 Host 版本做 exact-source contract，
+    config 覆盖需审查（避免整段 config 覆盖）。
+  推断：
+  + 状态按「会话/请求」分区 + WeakMap + ctx.effect，是本项目 Node 端状态管理的模板。
+  + 把「降采样/缓存/合并」放在适配器层，而不是散落在业务里，值得抄。
+  - 它是「请求-响应」型插件，不是常驻守护；没有长连接/心跳/背压语义，不能直接当 VHCU 的桥。
+
+3.2 dsh-unified-agent-memory（本机 node_modules/dsh-unified-agent-memory）
+  可核实事实：
+  - 形态：lib/index.js（94KB）+ lib/client-ui.js（140KB）+ core/（无依赖 Python 核）；
+    dsh.plugin.json 声明 entry.inject=["tools","webServer"]、client.platform="web"、client.inject=["slots"]。
+  - Python 调用：一次性 execFile（lib/index.js:150-183）
+    · 参数：python -m unified_memory.memory <args>；env 注入 UNIFIED_MEMORY_VAULT / PYTHONPATH；
+    · 选项：timeout、maxBuffer、windowsHide、signal（随 turn 取消）；
+    · 错误分类：ENOENT→missing；signal.aborted→aborted；killed+SIGTERM→timeout；其余→crash，
+      每类都给可执行 hint；
+    · child.unref()：不让子进程吊住宿主事件循环。
+  - 生命周期：ctx.on("agent/pre-step", ...) 注册钩子；缓存刷新用 setInterval + unref，
+    ctx.on("dispose", () => clearInterval(timer))（lib/index.js:1126-1130）。
+  - 工具注册：ctx 注入 tools/webServer，工具 schema 由插件提供；client 端通过 slots 挂 UI。
+  推断：
+  + 「一次性子进程 + 超时 + 中止 + 错误分类 + unref」是短任务 Python 调用的最佳实践，可直接复用其错误码体系。
+  - 进程-per-调用：每次 100-300ms 启动开销（估算，未实测），不适合 VHCU 的高频感知；
+    VHCU 必须是常驻 daemon + 复用模型/句柄。
+
+3.3 dsh-better-sidebar 0.28.0（本机，UI 载体的关键证据）
+  可核实事实：
+  - 对外服务 ctx.betterSidebar，扩展点 registerTab / registerFileViewer；
+    官方 README 给的接入样例：
+      import type {} from 'dsh-better-sidebar'
+      export const inject = ['betterSidebar']
+      export function apply(ctx) {
+        ctx.effect(() => ctx.betterSidebar.registerTab({
+          id: 'my-plugin:db', title: 'Database',
+          component: ({ scope }) => <DbView sessionId={scope.sessionId} />,
+        }))
+      }
+  - 宿主侧用 ctx.webServer.register(...) 注册 /sidebar/api/* 路由，另有 registerUpgrade 注册 WebSocket 升级；
+    所有注册都包在 ctx.effect 里（lib/index.js 多处）。
+  - 性能治理可作反面教材：0.25.0 起把 500ms/5s 轮询改为「仅可见时运行」，
+    实测 live 500ms timers 3→1、session.cwd 请求 15→0、强制布局 5190→30。
+  推断：
+  + VHCU 的 UI 应该做成 better-sidebar 的一个 tab（若未装则退化为浮动面板/独立页），而不是新窗口。
+  + 「仅可见时运行」必须写进 VHCU UI 规范：双轨时间轴不能靠常驻 setInterval 刷。
+  - 它是「UI 壳 + 文件服务」的样板，但不提供跨进程能力，不能替代 VHCU 的桥。
+
+3.4 DSH 插件生命周期的最小共识（综合三插件）
+  L1. 一切副作用（定时器、监听、路由、服务、子进程）必须挂在 ctx.effect / ctx.on('dispose') 上，
+      返回 disposer；插件被禁用/重载时必须能干净退出。
+  L2. 可选服务用 ctx.reflect.get(name, strict) 取，不要直接 ctx.xxx（未 inject 会抛异常）。
+  L3. 客户端 UI 通过 dsh.client（platform=web）+ slots 注入；服务端与客户端是两个 half，
+      共享代码要放 lib/shared 并避免 Node-only 依赖。
+  L4. 打包用 dsh.bundle.patch 指向 cordis.patch.yml，profile 的 bundles 列表只在启动时读取，
+      改动必须重启应用（记忆已确认）。
+  L5. 兼容性闸门只看 engines.dsh 与 @deepseek-ai/dsh* 的 peerDependencies；
+      peer 写 @deepseek-ai/cordis 不在检查范围（记忆已确认）。
+
+====================================================================
+4. 源码级拆解：底层音视频与图像
+====================================================================
+4.1 faster-whisper（SYSTRAN/faster-whisper，CTranslate2 后端）
+  可核实事实（faster_whisper/transcribe.py 默认值，259-289 行附近）：
+  - beam_size=5；vad_filter=True；condition_on_previous_text=True；
+    without_timestamps=True；word_timestamps=False；no_speech_threshold=0.6；
+    temperature 为一组回退值；prompt_reset_on_temperature=0.5；repetition_penalty=1。
+  - VAD（faster_whisper/vad.py，Silero）默认 threshold=0.5，neg_threshold=max(threshold-0.15,0.01)，
+    min_silence_duration_ms=2000，min_speech_duration_ms=0，min_silence_at_max_speech=98ms。
+  工程结论（面向 VHCU）：
+  P1) 模型只加载一次，常驻进程；每次转写复用 WhisperModel（加载成本远大于推理）。
+  P2) 流式不要指望模型内部流式：用 VAD 端点切段（建议 min_silence 500-800ms 而非默认 2000ms），
+      段长 3-10s，段级转写；每段独立、可并行、可丢弃。
+  P3) 实时场景 beam_size=1，关闭 condition_on_previous_text（否则长会话会复读/漂移），
+      no_speech_threshold 调高减少幻听；离线批处理再上 beam_size=5。
+  P4) 设备策略：GPU 用 float16，CPU 用 int8；large-v3 在 CPU 上不现实，V1 建议 small/medium 或 distil。
+  P5) 双音源（内录 loopback + 麦克风）：采集层统一重采样到 16k mono float32；
+      混音会产生回声/双讲，V1 建议「择一 + 可切换」，混音留到 V2。
+  P6) 进程边界：whisper 推理放独立线程/进程，绝不阻塞视觉主循环；结果以事件进总线。
+  注意：以上为源码默认值 + 工程经验；具体机型 RTF 需实测（本报告不编造 benchmark 数字）。
+
+4.2 Python 图像快速差分（Windows）
+  可核实事实：
+  - DXcam（ra1nty/DXcam）基于 DXGI Desktop Duplication，核心文件：
+    dxcam/core/dxgi_duplicator.py、capture_loop.py、display_recovery.py、output_recovery.py；
+    处理器有 numpy_processor.py（Cython 内核 + cv2 回退）与 cv2_processor.py；
+    输出 BGRA，支持 region 裁剪；自带恢复逻辑（显示器休眠/分辨率切换/独占全屏）。
+  - mss：BitBlt 路线（GDI），零编译依赖，1080p 约 30-60fps（经验值，未实测）。
+  推荐差分流水线（每帧）：
+    S1 抓取：DXcam region（只抓 ROI/窗口）或 mss 全屏；BGRA ndarray，零拷贝优先。
+    S2 降采样：a[::4, ::4]（切片，不插值）或 cv2.resize(INTER_AREA) 到 1/2~1/4。
+    S3 差分：np.absdiff 当前/上一帧（uint8 溢出用 cv2.absdiff 或先转 int16），
+            灰度化后与阈值比较；阈值建议 8-16（0-255）。
+    S4 形态学：cv2.morphologyEx(OPEN) 去噪 + dilate 合并邻近块；
+    S5 连通域：cv2.findContours / connectedComponentsWithStats → 取面积 top-N 作为 ROI；
+    S6 变化判定：ROI 面积占比 + 哈希（xxhash/blake2 对 ROI 块）避免「同图不同噪声」误报；
+    S7 编码：只在 UI 需要预览时把 ROI 编码成 JPEG/WebP（质量 60-75），或直接发原始 BGRA 给本地 UI。
+  性能量级（估算，待实测）：1080p 抓取 3-8ms；1/4 降采样 1-2ms；ROI absdiff <1ms；
+    全流程 P50 5-12ms，可支撑 30-60fps 的「变化检测」，但没必要每帧都跑满 —— 按需唤醒后
+    用「低频率哨兵（如 4-8fps 只看变化）+ 触发后升频」两档。
+  反模式：每帧 PIL.ImageGrab → PNG 编码 → base64 → JSON（这是 TARS 路线，成本高一个数量级）。
+
+====================================================================
+5. 问题一：外部 Python 感知进程 ↔ DSH UI 前端，数据总线怎么设计？
+====================================================================
+5.1 设计目标（按优先级）
+  G1 不空转：没有订阅者/没有触发时，链路上不应有周期流量。
+  G2 低延迟：感知事件到 UI 渲染 P95 < 30ms（本机，估算目标）。
+  G3 不丢关键帧、可续传：视觉事件可丢旧帧（latest-wins），状态事件不可丢（seq 连续）。
+  G4 故障隔离：Python 挂了/卡了，DSH 与 UI 不受影响；UI 能显示降级原因。
+  G5 零配置：不写端口、不写 token 文件、不做发现（或把发现降到最低）。
+  G6 可观测：任何一条链路都能用现成工具（curl/浏览器 devtools/日志）复现问题。
+
+5.2 候选对比
+  方案                         延迟    可靠性/复杂度                  适配度
+  A stdio NDJSON（父子管道）    最低    高/低（生命周期天然绑定）      控制面最佳；不适合大图像
+  B loopback HTTP + SSE         低      中/中（端口、token、发现、清理） 数据面可用；island 已验证
+  C WebSocket 双向              低      中/中高（重连状态机）          可选；Python 侧多依赖
+  D 命名管道/共享内存           最低    低/高（Windows 权限、调试难）   不推荐
+  E 文件轮询                    高      低/低                          仅用于崩溃取证
+  结论：没有单一最优，按「车道」拆。
+
+5.3 推荐：VH-Bus v1（三车道）
+  车道 1｜控制面：Node ⇄ Python，stdio NDJSON
+    - Node spawn 时 stdio:['pipe','pipe','pipe']；下行 write(JSON+'\n')，上行 readline 逐行解析。
+    - 行协议硬约束：单行 ≤ 64KB；非法行丢弃并计数；每行必须 {v:1, seq, type, id?, ts, ...}。
+    - 类型：hello/ready、cmd、ack、event、heartbeat、error、shutdown。
+    - 为什么不用 HTTP：控制流是「父→子」，stdin 天然存在；省掉端口/token/发现/清理四类故障点。
+    - 关键细节（必须写进实现）：Python 启动后立刻把协议通道与日志分离：
+        proto = os.fdopen(os.dup(1), 'w', buffering=1)
+        sys.stdout = sys.stderr   # 之后所有库的 print/日志都走 stderr
+      否则 whisper/ffmpeg/第三方库任何一次 print 都会污染协议流。
+    - 背压：Node 侧上行用「有界队列 + 丢弃策略」；视觉事件 latest-wins，状态事件不允许丢
+      （队列满时阻塞读或降级为 error 事件，绝不静默丢 seq）。
+
+  车道 2｜图像面：Python 本地 HTTP，按需拉取
+    - Python 在 127.0.0.1:0 起一个极简 HTTP 服务（仅 GET /frame/{id}?roi=x,y,w,h&fmt=jpg&q=70），
+      READY 行里返回 port + 一次性 token（每次启动随机）。
+    - 只允许 127.0.0.1 绑定；token 用 hmac.compare_digest 比较；单连接超时 2s；并发上限 2。
+    - Node 不缓存大图；UI 需要预览时经 Node 的 ctx.webServer 同源路由转发（浏览器不直连 Python）。
+    - 为什么独立成 HTTP：图像是「拉模式」，天然可丢、可取消、可限流；走 stdio 会阻塞控制流。
+    - 白皮书第 2 条的落地：模型 API 只收到 JSON（变化区域、尺寸、文字、置信度），
+      图像永远只在本地链路里流转。
+
+  车道 3｜UI 面：Node ⇄ 浏览器，同源 SSE（或 WebSocket upgrade）
+    - 用 ctx.webServer.register 提供 /vhcu/events（SSE）与 /vhcu/cmd（POST）；
+      同源即免鉴权（依赖宿主会话），无需 token。
+    - SSE 帧：id: <seq> + data: {增量 JSON}；心跳 15s（注释帧）；断线用 Last-Event-ID 续传。
+    - 视觉预览走 /vhcu/frame/{id}（Node 代理 Python 的 /frame），Content-Type: image/jpeg。
+    - 若未来需要双向低延迟（例如拖拽选 ROI），再对 /vhcu/ws 用 registerUpgrade 加一条 WS，
+      不影响主链路。
+
+5.4 协议骨架（示例，字段名待 P0 契约冻结）
+  下行 cmd:   {"v":1,"seq":11,"type":"cmd","id":"c-7","op":"vision.start",
+               "args":{"fps":8,"roi":null,"trigger":"session-active"},"deadlineMs":3000}
+  上行 evt:   {"v":1,"seq":128,"type":"event","kind":"vision.diff","ts":1793435000123,
+               "screen":{"w":2560,"h":1440,"scale":1.25},
+               "rois":[{"id":3,"x":812,"y":410,"w":220,"h":96,"score":0.82,"hash":"9f3c"}],
+               "stats":{"captureMs":4.1,"diffMs":0.9,"fps":7.8}}
+  上行 err:   {"v":1,"seq":129,"type":"error","code":"E_CAPTURE","message":"...","fatal":false}
+  错误码：E_PROTO / E_TIMEOUT / E_BUSY / E_DENIED / E_UNAVAILABLE / E_STATE / E_CAPTURE / E_INTERNAL
+  语义：seq 单调递增；cached 快照（如 UI 重连）用 {type:"snapshot", asOfSeq, values} 表达，
+        与 DSH 投影的「增量合并」语义一致（记忆 M4）。
+
+5.5 为什么这不是 island 方案的简单复用（差异表）
+  维度          island                         VHCU
+  服务端        Node（宿主插件）                Python（子进程）
+  客户端        渲染层（同源/带 token）         Node（父进程）
+  控制方向      浏览器→Node                    Node→Python（stdin）
+  发现          endpoint.json（曾出 bug）       无（READY 行进 stdout）
+  大对象        无                              图像走独立 HTTP 拉取
+  失效影响      UI 未连接                       视觉不可用，DSH 照常
+
+5.6 延迟预算（估算，P0 实测校准）
+  段                          目标 P50    说明
+  DXGI 抓取（1080p 区域）      3-6ms      区域越小越快
+  降采样 1/4 + 灰度            1-2ms      切片优先
+  ROI absdiff + 连通域         0.5-2ms    只算脏区
+  JSON 序列化 + stdio 写        <0.5ms     小对象
+  Node 转发到浏览器（SSE）      0.5-1.5ms  同源，无 TLS
+  浏览器渲染                    ≤16ms      与帧同步
+  合计（感知→可见）             6-12ms      不含模型推理
+
+====================================================================
+6. 问题二：Node.js 如何安全启动、监控、强制杀死外部 Python（防僵尸）
+====================================================================
+6.1 启动（spawn）
+  - 解释器：优先用户配置的 pythonPath；其次 py -3（Windows Launcher）；最后 python。
+    启动前做一次 `--version` 探测（≤2s），失败给出可执行 hint（不要静默回退到错误解释器）。
+  - 参数：python -u -m vhcu.daemon --parent-pid <process.pid> --proto 1
+    （-u 关缓冲；父 pid 给看门狗用）。
+  - 选项：{ windowsHide:true, detached:false, stdio:['pipe','pipe','pipe'],
+            env: cleanEnv } —— detached:false 是硬要求（island 教训：detached 会在宿主崩溃时留孤儿）。
+  - 环境清洗：删除 ELECTRON_RUN_AS_NODE（必须 delete，不能设 undefined/空串）；
+    设 PYTHONUNBUFFERED=1、PYTHONIOENCODING=utf-8、PYTHONUTF8=1；
+    去掉无关的 ELECTRON_*/NODE_OPTIONS，避免子进程被 Electron 环境污染。
+  - 就绪门：READY 行 ≤15s；超时视为启动失败 → 计入熔断。
+  - 单实例：锁文件 %LOCALAPPDATA%\dsh-vhcu\daemon.lock 内容 {pid, startTime, proto, port}；
+    启动前探活（pid 存在 + 启动时间匹配 + /health 应答）→ 复用或先停旧；避免多开抢屏幕/麦克风。
+
+6.2 监控
+  - 心跳：Python 每 1s 上行 heartbeat（含 loop lag、fps、队列深度、RSS）；
+    Node 侧 3s 未收到 → 判死（不是等 exit，卡死的进程不会 exit）。
+  - stderr：环形缓冲（200 行 × 500 字符），只进日志，不进协议；
+    连续同类错误 ≥N 次 → 降级事件（E_UNAVAILABLE）。
+  - 熔断：5 分钟内 3 次启动失败/心跳丢失 → open（视觉停用、UI 明示、DSH 照常）；
+    提供手动 restart（等价 island 的 supervisor.restart()，清零熔断计数）。
+  - 退避：500ms → 1s → 2s → … → 30s（指数，带上限），与 island 一致。
+  - 资源：Python 自报 RSS + 帧耗时；RSS > 1.2GB 或 P95 帧耗时 > 100ms 持续 30s → 重启。
+
+6.3 停止（三段式，幂等）
+  S1 优雅：写 {"type":"shutdown"} 到 stdin → 等 3s（Python finally 清理 + 退出）。
+  S2 信号：child.kill('SIGTERM')（Windows 上等价 TerminateProcess，仅杀该进程）→ 等 2s。
+  S3 强杀：taskkill /PID <pid> /T /F（/T 连带子进程树：ffmpeg、whisper worker）。
+  只在 child.exitCode === null 时执行 S2/S3；进程已退出则跳过（防误杀复用 pid）。
+  记录 exitCode/signal/耗时，写入诊断环。
+
+6.4 防僵尸的四道闸（缺一不可）
+  Z1 Python 自杀：看门狗线程每 2s 检查父进程是否存活
+     （Windows: ctypes OpenProcess(SYNCHRONIZE) + WaitForSingleObject(0)；POSIX: os.kill(ppid,0)），
+     父死 → 清理子进程 → os._exit(0)。这是宿主崩溃时唯一可靠的兜底。
+  Z2 子进程树：Python 自己的 ffmpeg/whisper worker 必须登记，finally 中 terminate+kill；
+     Windows 用 CREATE_NEW_PROCESS_GROUP + taskkill /T 兜底。
+  Z3 Node 退出钩子：process.on('exit'/'SIGINT'/'SIGTERM') 里同步尝试 taskkill（best effort，不阻塞）。
+  Z4 锁文件恢复：启动时若发现旧 lock 且 pid 存活但 /health 不应答 → 视为残留，强杀后重建；
+     pid 不存活 → 直接清 lock。
+  另外：绝不写「按名字杀 python.exe」这种逻辑（会误杀用户其他 Python）。
+
+6.5 与三个参考实现的对应
+  - island supervisor：退避/熔断/READY/有界日志/不 detached —— 直接复用形态。
+  - Qwen-Agent：子进程登记表 + 退出 terminate —— 我们升级为 OS 级 taskkill /T /F。
+  - unified-memory：超时 + AbortSignal + 错误分类 + unref —— 错误码体系直接沿用其分类思路。
+  - 差异：它们是「一次性调用」或「应用内子进程」，我们是「长驻 + 可重启 + 可熔断」，所以多了 Z1/Z4。
+
+====================================================================
+7. 问题三：VHCU V1.0 模块拆解与优先级（第一步落哪块、为什么）
+====================================================================
+7.1 模块清单（含验收标准）
+  P0-1 契约 v1（vhcu-contract）
+       内容：帧 schema、错误码、seq/快照语义、命令白名单、超时矩阵、版本协商。
+       验收：纯 JSON Schema + 单测；Node/Python/UI 三方共享同一份 golden fixtures。
+  P0-2 Node 守护与桥（vhcu-host）
+       内容：spawn/READY/心跳/三段式停止/熔断/日志环/ctx.effect 清理/ctx.webServer 路由。
+       验收：kill -9 Python → 5s 内自动重启；连续 3 次失败 → 熔断且 DSH 可用；
+             插件卸载 → 无残留进程、无残留定时器（process._getActiveHandles 检查）。
+  P0-3 Python 视觉守护 v0（vhcu-vision）
+       内容：DXcam/mss 抽象、降采样、ROI diff、变化事件、按需预览帧、he（self-watchdog）。
+       验收：1080p 变化检测 P50 ≤ 15ms；静止画面 CPU ≤ 1%（8fps 哨兵）；
+             触发关闭后 0 帧采集（可用计数器证明「不空转」）。
+  P0-4 UI 壳最小版（vhcu-ui）
+       内容：better-sidebar tab（状态灯/启停/差分缩略/最近事件）；无 sidebar 时退化浮动面板。
+       验收：可见时 ≤1 个定时器且随可见性启停；断线自动重连并补最后快照。
+  P1-5 触发与生命周期策略（vhcu-trigger）
+       内容：会话 active 检测、用户开关、idle 超时退出、前后台切换、隐私暂停。
+       验收：无 active 会话 30s 后 Python 退出（进程数=0）；恢复时冷启动 ≤1.5s。
+  P1-6 Hear（vhcu-hear）
+       内容：双音源采集、VAD 切段、faster-whisper 常驻转写、文本事件。
+       验收：5s 语音段 RTF ≤0.6（CPU int8，估算目标）；静音 30s 零转写；
+             转写与视觉互不阻塞（各自独立线程/进程）。
+  P2-7 执行层（vhcu-act）
+       内容：预设宏（点击/输入/热键/等待）、视觉寻址兜底（ROI→坐标）、预判流水线。
+       验收：宏回放成功率 ≥95%；每步有 before/after 截图与可撤销记录（审计）。
+  P2-8 双轨时间轴完整版（vhcu-timeline）
+       内容：视听双轨、事件回放、导出诊断包。
+       验收：1 万事件滚动不掉帧；导出包含协议日志 + 关键帧。
+
+7.2 依赖关系
+  契约(P0-1) → 守护(P0-2) → 视觉(P0-3) → UI(P0-4) → 触发(P1-5)
+                                          ↘ Hear(P1-6) → 执行(P2-7) → 时间轴(P2-8)
+  （Hear 与 执行 可并行，但都必须复用同一条总线与同一套 seq 语义。）
+
+7.3 第一步：P0-1 + P0-2 + P0-3 的「垂直切片」，先假感知后真差分
+  第 1 周：契约冻结 + Node 守护 + Python 假 daemon（只发 heartbeat/伪 diff 事件）+ 命令行验证。
+  第 2 周：换真捕获（mss 起步）+ 真差分 + 帧拉取；用数据校准延迟预算。
+  第 3 周：接 UI tab（只读展示），跑「静止/滚动/视频/锁屏/UAC」五类场景。
+  为什么不是先做 UI：UI 只是 JSON 渲染，返工成本最低；先做会把契约缺陷掩盖到后期。
+  为什么不是先做 Hear：Hear 与 Vision 争 CPU/内存，且不验证主链路的生命周期；白皮书把 Vision 排第 2 有道理。
+  为什么必须先做守护：进程生命周期是唯一「出错就毁掉用户环境」的部分（孤儿进程、误杀、熔断缺失），
+    也是 island 踩坑最多的地方；在代码量最小时验证它，成本最低。
+  为什么契约必须第一：seq/快照/错误码一旦被三方实现固化，后期改动等于重写；先用 golden fixtures 钉死。
+
+7.4 明确不做（V1 范围外）
+  - 不做 VM/容器沙箱（InfantAgent 路线），V1 只操作本机。
+  - 不做任意代码执行（OS-Copilot 路线），执行层只允许白名单宏 + 受控视觉寻址。
+  - 不做多显示器全覆盖，V1 只做主屏（多屏留接口）。
+  - 不做云端中继/远程桌面，全部 127.0.0.1。
+  - 不把图像发给模型 API（白皮书硬约束）。
+
+====================================================================
+8. 风险清单（按概率×影响排序）
+====================================================================
+R1 隐私/合规：屏幕与麦克风常开感知。对策：默认关闭、显式开启、状态灯常亮、
+   敏感窗口黑名单（密码管理器/银行）、一键暂停、日志脱敏。
+R2 杀软/EDR 误报：全局键鼠注入 + 截屏 + 子进程。对策：只做用户态、不注入 DLL、
+   不 hook、不在临时目录落地可执行文件；安装说明写清楚。
+R3 Windows DPI/缩放：逻辑坐标 vs 物理坐标错位（TARS 用 scaleFactor 处理）。
+   对策：协议里同时带 physical/logical + scale，坐标换算集中在共享模块并单测。
+R4 独占全屏/DRM 黑屏：DXGI 抓不到受保护内容。对策：检测黑帧 → 降级提示，不静默失败。
+R5 UAC/安全桌面：无法截图/注入。对策：检测并暂停，提示用户。
+R6 Python 环境漂移：用户升级 Python/缺 VC 运行库。对策：启动自检 + 明确错误码 + 版本锁定。
+R7 麦克风回声/双讲：内录 + 麦克风同时开。对策：V1 择一，V2 再做 AEC。
+R8 长会话内存：UI 事件堆积。对策：环形缓冲 + 只保留 N 分钟 + 可见性节流（better-sidebar 教训）。
+R9 模型幻觉（视觉描述）：差分 JSON 给模型，模型编造。对策：JSON 只给事实字段 + 置信度，
+   模型输出必须引用 ROI id；执行层不直接采信自然语言。
+R10 端口占用/防火墙：loopback 一般免防火墙，但仍可能被策略拦。对策：失败即降级为纯 stdio 模式。
+
+====================================================================
+9. 待你决策（D1-D8，回复编号即可；未回复我按推荐项执行）
+====================================================================
+D1 总线：A) stdio 控制 + loopback HTTP 图像 + 同源 SSE（推荐）
+         B) 纯 HTTP+SSE（island 复用）  C) WebSocket 双向
+D2 UI 载体：A) DSH 原生侧边栏 tab（ctx.betterSidebar，推荐）
+            B) 独立 Electron 窗（island 复用）  C) 两者都做（tab 优先，窗为可选）
+D3 捕获后端：A) mss 起步（零编译，30-60fps，推荐 V1）
+             B) DXcam（高性能，需编译/轮子）  C) 抽象双后端，按配置切换（推荐终态）
+D4 触发闸门：A) 仅当前会话 active + 用户开启（白皮书，推荐）
+             B) 全局常开  C) 仅手动开启（最保守）
+D5 Python 运行环境：A) 用户配置 pythonPath + venv（推荐）
+                   B) 插件内置便携 Python（体积大）  C) 系统 py -3
+D6 音源：A) V1 择一（默认麦克风，可切内录，推荐）  B) 同时采集混音
+D7 差分 JSON 的消费者：A) 当前会话模型（经 DSH 路由，推荐）  B) 独立本地小模型  C) 暂不接模型，只给 UI
+D8 命名：包名 dsh-vhcu / 服务前缀 vhcu / 数据目录 %LOCALAPPDATA%\dsh-vhcu（推荐，可改）
+
+====================================================================
+10. 下一步（等你 D1-D8 后立即执行）
+====================================================================
+N1 冻结 vhcu-contract v1（JSON Schema + golden fixtures + 错误码表）。
+N2 落 P0-2 守护骨架 + 假 daemon，跑「kill -9 / 断网 / 卡死 / 卸载」四类故障注入。
+N3 落 P0-3 真捕获 + 差分，输出实测延迟/FPS/CPU 三张表（替换本报告第 5.6 节的估算）。
+N4 接 P0-4 UI tab，做「静止/滚动/视频/锁屏/UAC」五场景验收。
+N5 每轮产出仍按你的规则落带时间戳 .txt。
+
+====================================================================
+11. 证据与局限（可复核）
+====================================================================
+本机源码（逐字读过关键段）：
+  dsh-island/lib/host/bridge.js、supervisor.js、lib/shared/contract.js
+  dsh-vision-router/index.js（头部注释、2206/4725/4849 等）、lib/adapter-update-coalescer.js、
+    lib/core-apply-lifecycle.js、cordis.patch.yml、package.json
+  dsh-unified-agent-memory/lib/index.js（120-200、1008-1130）、dsh.plugin.json、cordis.patch.yml
+  dsh-better-sidebar/README.md（131-145）、lib/index.js（ctx.webServer.register / registerUpgrade）
+GitHub 源码（经 api.github.com 拉取，落盘 %TEMP%\vhcu\src）：
+  bytedance/UI-TARS-desktop：apps/ui-tars/src/main/agent/operator.ts、services/runAgent.ts、
+    remote/operators.ts、utils/screen.ts、multimodal/agent-tars/core/src/agent-tars.ts
+  OS-Copilot/OS-Copilot：oscopilot/modules/executor/friday_executor.py、
+    environments/base_env.py、tool_repository/manager/tool_manager.py
+  QwenLM/Qwen-Agent：qwen_agent/agents/fncall_agent.py、tools/python_executor.py、tools/mcp_manager.py
+  bin123apple/InfantAgent：infant/computer/computer.py、infant/agent/agent.py
+  SYSTRAN/faster-whisper：faster_whisper/transcribe.py、vad.py、audio.py
+  ra1nty/DXcam：dxcam/processor/numpy_processor.py（另读了目录树，确认 recovery/duplication 模块存在）
+局限（请勿把推断当事实）：
+  - @ui-tars/sdk 的主循环源码不在 UI-TARS-desktop 仓内（npm 包），其内部重试/取消细节未核实。
+  - InfantAgent 仓库是否就是「InfantAgent-Next」的当前地址，仅凭代码结构（infant 包）判断，未读 README 确认沿革。
+  - 本报告所有延迟/FPS/RTF 数字均为估算或源码默认值，P0 阶段必须用本机实测替换。
+  - 本机 GitHub 仅 api.github.com 可达，匿名额度 60/h；本轮消耗约 20 次，后续大仓库调研需排优先级。
+  - 未实测 dsh-vision-router 的 per-call 日志（其日志只有启动行），故其性能结论来自源码而非运行数据。
+
+====================================================================
+附录 A：本轮聊天窗口回复原文（归档，保持与页面一致）
+追加时间：2026-10-31 15:27
+说明：用户要求「把页面上生成的也打包进这个 txt」，以下为我在聊天窗口实际发出的回复全文。
+====================================================================
+
+**报告已落盘**：VHCU-P1-01-架构调研与源码拆解-20261031-1524.txt（工作区根目录，后续每轮同样落带时间戳 .txt）。
+
+## 记忆检索结果（本轮实际命中）
+
+- **dsh-island 已结项，底座可复用**：loopback HTTP+SSE、listen(0) 端口、token 定长化 +
+  timingSafeEqual、15s 心跳、SSE 客户端上限 4、C1 帧 4096B、C2 请求 8192B。
+- **守护层教训**：spawn 必须**硬删除 ELECTRON_RUN_AS_NODE**；detached:false 防孤儿；
+  退避 500ms→30s + 熔断；READY_MARKER 就绪门；日志 80 行 × 500 字符有界；
+  「等待重启」的定时器**不能** unref，兜底定时器必须 unref。
+- **两个真实故障根因**：①「未连接」= 窗口先于 endpoint.json 写出、渲染层只读一次；
+  ②「指标全空」= cordis 未 inject 直接取服务会抛异常，应 ctx.reflect.get(name, strict)。
+- **投影语义**：{kind, asOfSeq, values}，values 是**增量合并**——VHCU 总线帧直接沿用 seq+增量语义。
+- **环境**：本机只有 api.github.com 可达（60 次/小时）；插件源码在
+  ~/.dsh/profiles/desktop/node_modules，本轮已直读 vision-router、unified-memory、better-sidebar。
+
+## 拆解结论（详见报告第 2–4 节）
+
+  项目              可抄                                        别抄
+  Agent TARS        Operator 抽象（screenshot/execute）、        每步全屏截图 PNG、
+                    事件流、SoM 标记、abortController            输入在主进程内
+  InfantAgent       沙箱可插拔思路                              Docker+xrdp+Guacamole
+                                                                三层，秒级延迟
+  OS-Copilot        工具沉淀/自学习                             任意 Python 代码执行、
+                                                                terminate 空契约
+  Qwen-Agent        子进程登记表 + 超时 terminate、MCP 协议     拿它当感知/执行主链路
+  vision-router     会话级 WeakMap、ctx.effect、哈希缓存、      它是请求-响应型，
+                    更新合并                                    不是常驻守护
+  unified-memory    execFile 超时/中止/错误分类/unref            进程-per-调用，
+                                                                扛不住高频
+  faster-whisper    模型常驻 + VAD 切段 + beam_size=1 +         指望模型内部流式
+                    conditions=False
+  DXcam/mss         DXGI 抓 BGRA → 切片降采样 → ROI absdiff     PIL 每帧 PNG/base64
+
+## 三个回答（一句话版）
+
+1. **总线**：不照搬 island 单通道。VH-Bus v1 = **stdio NDJSON 控制面** +
+   **Python loopback HTTP 按需拉图像** + **DSH webServer 同源 SSE 给 UI**。
+   理由：控制流是父→子，stdio 天然存在；图像是拉模式，不阻塞控制流；同源 UI 免鉴权免发现。
+2. **进程管理**：80% 靠 Python **自杀**（parent-pid 看门狗 + finally 杀子进程），
+   Node 只做三段式 shutdown → SIGTERM → taskkill /T /F，只杀 exitCode===null 的自有句柄，
+   绝不按 pid 盲杀、绝不按名字杀 python.exe。
+3. **第一步**：先落 **P0-1 契约 + P0-2 守护 + P0-3 假感知→真差分**垂直切片。
+   契约不可逆、生命周期风险最高、差分性能是最大技术风险；UI 只是 JSON 渲染，最后做不返工。
+
+## 需你拍板（回复编号即可）
+
+- D1 总线：A stdio+HTTP+SSE（推荐）／B 纯 HTTP+SSE／C WebSocket
+- D2 UI 载体：A 原生侧边栏 tab（ctx.betterSidebar.registerTab，推荐）／B 独立 Electron 窗
+- D3 捕获：A mss 起步（推荐）／B DXcam／C 双后端抽象
+- D4 触发：A 仅 active 会话+用户开启（推荐）／B 全局常开
+- D5 Python 环境：A 用户 pythonPath+venv（推荐）／B 内置便携 Python
+- D6 音源：A V1 择一（推荐）／B 混音
+- D7 差分 JSON 消费者：A 当前会话模型（推荐）／B 本地小模型／C 只给 UI
+- D8 命名：dsh-vhcu / 前缀 vhcu / %LOCALAPPDATA%\dsh-vhcu（推荐）
+
+> 注：本轮所有延迟/FPS/RTF 都是估算或源码默认值，报告第 11 节已列为局限，
+> P0 阶段会用本机实测替换。
+
+（附录 A 完）
+
+====================================================================
+附录 B：本轮记忆写入记录
+====================================================================
+2026-10-31 15:25 通过 memory_submit 写入 5 条事实，落盘到
+<obsidian-vault>
+内容要点：项目启动与白皮书 5 条；总线/UI/守护三项结论；本地插件源码位置；better-sidebar 扩展点。
+（promoter 会在后续 review 时归类进正式笔记。）
+
+（报告完）

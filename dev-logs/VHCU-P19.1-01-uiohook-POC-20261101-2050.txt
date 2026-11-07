@@ -1,0 +1,118 @@
+DSH-VHCU  P19.1-01  uiohook-napi POC 实测
+生成时间：2026-11-01 20:50 (Asia/Shanghai)
+阶段：P19.1（uiohook-napi 概念验证）
+范围：安装依赖；独立 POC 脚本；不接入 VHCU 插件主逻辑。
+
+====================================================================
+1. 时间 / 阶段 / 范围
+====================================================================
+  时间：2026-11-01 20:50 +08:00
+  阶段：P19.1
+  目标：
+    - 验证 uiohook-napi 原生模块能否在 Node 24/Windows 上加载；
+    - 验证全局键盘/鼠标/滚轮钩子能否启动并打印事件；
+    - 不接入插件，避免 POC 崩溃影响 VHCU。
+  范围：
+    - dsh-vhcu 目录 npm install；
+    - 新增 vision/test_uiohook.js；
+    - 不修改插件 lib/ 与 Python。
+
+====================================================================
+2. 本轮交付物
+====================================================================
+2.1 依赖
+    命令：npm install uiohook-napi
+    实际：uiohook-napi@1.5.5
+    归位：devDependencies（POC 专用，避免生产包默认携带未使用的原生钩子）
+    原生二进制：
+      node_modules/uiohook-napi/prebuilds/win32-x64/uiohook-napi.node
+      大小 169 KiB
+    package.json：
+      "devDependencies": { "uiohook-napi": "^1.5.5" }
+      "scripts": { "poc:uiohook": "node vision/test_uiohook.js" }
+2.2 POC 脚本
+    文件：vision/test_uiohook.js（ESM，package type=module）
+    行为：
+      - import { uIOhook, UiohookKey } from 'uiohook-napi'；
+      - keydown：打印键名/键码/修饰键/时间；
+      - mousedown：打印按钮/坐标/点击次数/修饰键/时间；
+      - wheel：打印方向/数量/旋转/坐标/时间；
+      - 启动后打印四行提示；
+      - Ctrl+C / SIGTERM：stop() 并退出。
+    事件格式示例：
+      [事件] 键盘按下 键=A 键码=30 修饰=Ctrl 时间=20:50:01.123
+      [事件] 鼠标按下 按钮=1 坐标=(640,360) 点击次数=1 修饰=- 时间=...
+      [事件] 滚轮 方向=-1 数量=1 旋转=0 坐标=(640,360) 时间=...
+    注意：
+      - 不写文件、不发网络、不注入按键、不读系统剪贴板；
+      - 仅监听并打印，不 suppress 任何事件；
+      - 不接入插件主逻辑。
+
+====================================================================
+3. 证据
+====================================================================
+3.1 实测环境
+    Node：v24.15.0
+    npm：11.12.1
+    OS：Windows（当前 DSH 桌面环境）
+    安装输出：added 2 packages in 16s
+    模块版本：1.5.5
+    原生文件：prebuilds/win32-x64/uiohook-napi.node，169 KiB
+3.2 启动实测
+    node --check vision/test_uiohook.js 通过；
+    timeout 3s node vision/test_uiohook.js 输出：
+      ==============================================
+      [VHCU] uiohook-napi POC 已启动
+      [VHCU] 请按键、点击鼠标或滚动滚轮，终端会打印事件。
+      [VHCU] 按 Ctrl+C 退出。
+      ==============================================
+    timeout 以 124 退出是预期（外部强制超时），不是模块崩溃；
+    原生模块加载、钩子 start() 均成功。
+3.3 未实测
+    - 真实键盘/鼠标/滚轮事件打印（自动化终端无法代替人工按键）；
+    - Windows Defender 完整扫描/拦截记录；
+    - Electron 打包后 .node 加载（POC 用系统 Node，不是 Electron ABI）；
+    - 长时间运行/钩子超时/睡眠恢复。
+3.4 代码引用
+    vision/test_uiohook.js：POC 全部逻辑；
+    package.json：devDependencies/scripts；
+    package-lock.json：锁定 uiohook-napi 及其 2 个包。
+
+====================================================================
+4. 风险与未验证项
+====================================================================
+R1. POC 使用系统 Node 24 加载；Electron 内置 Node ABI 可能不同。
+    N-API 通常兼容，但插件打包仍需 electron-rebuild/实测。
+R2. 当前只验证“启动成功”，未验证键鼠事件回调；需人工按键。
+R3. 原生全局钩子可能被 Windows Defender/EDR 拦截；
+    本轮未执行完整 Defender 扫描，无法给出“绝不拦截”结论。
+R4. 169 KiB 只是 win32-x64 prebuild；macOS/Linux/arm64 另计。
+R5. uiohook-napi 放在 devDependencies：
+    `npm install --omit=dev` 后 POC 不可用；生产插件也不会默认携带。
+R6. 全局钩子具备 keylogger 行为特征，未来接入必须先做显式录制提示、
+    暂停、隐私窗口过滤、预览后保存。
+
+====================================================================
+5. 待确认决策（编号）
+====================================================================
+D1. POC 依赖放 devDependencies，而非生产 dependencies。
+D2. POC 只打印事件，不做 suppress/宏生成/持久化。
+D3. 事件字段用 uiohook 原始 keycode/x/y/button/wheel；
+    后续需要建立到 VHCU 键名的映射表。
+D4. 下一步是否把 uiohook 集成到独立 recorder 进程/模块，
+    在 POC 事件验证通过后再决定。
+
+====================================================================
+6. 下一步计划
+====================================================================
+N1. 用户在终端运行：
+      cd <local-path>
+      node vision/test_uiohook.js
+    或：
+      npm run poc:uiohook
+N2. 按键盘、点击鼠标、滚动滚轮，确认终端出现 [事件] 行。
+N3. 打开 Windows 安全中心 → 保护历史记录，确认是否有 Defender 拦截；
+    若被拦截，记录文件名并加入允许列表后重试。
+N4. 人工验证通过后，再评估 Electron 打包加载与键名映射。
+
+（报告完）

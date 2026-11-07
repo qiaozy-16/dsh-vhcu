@@ -1,0 +1,166 @@
+DSH-VHCU  P12.2.6-01  Hear 声卡 5s 防护 + 启动预算 30s
+生成时间：2026-11-01 13:35 (Asia/Shanghai)
+阶段：P12.2.6（放宽 Node 熔断；Python 声卡设备获取加日志/超时/错误回传）
+前置：P12.2.5 10s 熔断在 Electron 环境误报；模型已确认 1s 级离线加载
+
+====================================================================
+0. 结论（先看这 6 条）
+====================================================================
+C1. Node HEAR_START_TIMEOUT_MS 从 10s 放宽到 30s；超时文案自动显示 30s。
+C2. Python hear.py 对声卡四步加明确日志与 5s 上限：
+      default_speaker
+      get_microphone(id/name)
+      all_microphones(include_loopback=True)
+      mic.recorder(...)
+    每步 print `[hear] audio: ...`；超时抛 HearAudioTimeout(E_AUDIO_DEVICE)。
+C3. soundcard 抛出的异常会包装成 HearError(E_AUDIO_DEVICE)，
+    `_run` 捕获后 `state.hear=error`、lastError 带 “E_AUDIO_DEVICE: ...”，
+    Node 收到 hear.status error → UI 红灯 + stderr，不再静默卡死。
+C4. 真机验证（本机）：
+    - HearService.start() 8s 内 loading → listening；
+    - 日志显示 default_speaker ok、all_microphones count=4、
+      selected loopback device、mic.recorder opened、capture loop started。
+C5. 测试：Node 45/45、Python 59/59。
+C6. 仍保留 P12.2.5 的 taskkill 清场、30s 熔断、stderr 透传。
+
+====================================================================
+1. Node 修改（lib/index.js）
+====================================================================
+  const HEAR_START_TIMEOUT_MS = 30000;   // 原 10000
+  doStartHear:
+    deadline = Date.now() + 30000
+    send('hear.start', timeoutMs=30000)
+    waitForHearReady(deadline-now)
+  超时错误：
+    "Hear 启动超时（30s）：未收到 listening"
+    code E_TIMEOUT
+    hint 最近 8 行 daemon stderr
+  UI 红灯并显示；不会无限黄灯。
+  其余清场/错误透传逻辑沿用 P12.2.5。
+
+====================================================================
+2. Python 修改（vision/vhcu_daemon/hear.py）
+====================================================================
+2.1 新增
+      AUDIO_DEVICE_TIMEOUT = 5.0
+      class HearAudioTimeout(HearError): pass
+      _audio_device_call(label, func, timeout=5.0)
+        - print "[hear] audio: <label> ..."
+        - 在 daemon 线程里执行 func（防止 WASAPI 枚举死锁主线程）
+        - done.wait(timeout)
+        - 超时:
+            print "[hear] audio: TIMEOUT ..."
+            raise HearAudioTimeout("E_AUDIO_DEVICE",
+              "<label> 超过 5s 未返回，无法获取系统内录设备", hint)
+        - func 抛异常:
+            print "[hear] audio: ERROR <label>: ..."
+            raise HearAudioTimeout("E_AUDIO_DEVICE",
+              "<label> 失败：<error>", hint)
+        - 成功 print "[hear] audio: <label> ok"
+2.2 _open_loopback(sc)
+      print "resolving default speaker loopback"
+      speaker = _audio_device_call("default_speaker", sc.default_speaker)
+      print default_speaker name
+      for identifier in (speaker.id, speaker.name):
+          mic = _audio_device_call("get_microphone(...)", ...)
+      mics = _audio_device_call("all_microphones(include_loopback=True)", ...)
+      print count
+      选中后 print "selected loopback device = <name>"
+      找不到 → HearError("E_AUDIO_DEVICE", "没有找到...", hint)
+2.3 _capture_loop
+      print "opening mic.recorder ..."
+      recorder = _audio_device_call("mic.recorder",
+                    lambda: mic.recorder(samplerate=16000, channels=1))
+      print "mic.recorder opened; capture loop started"
+      with recorder: ...
+2.4 _run 错误
+      except HearError as error:
+          self._set("error", f"{error.code}: {error}")
+          self._log(...)
+      → status error 帧带 error 文本；
+      → Node state.hear.state=error、lastError=E_AUDIO_DEVICE: ...、stderr。
+
+====================================================================
+3. 真机验证（本机，依赖已装）
+====================================================================
+  HearService.start() → 8s 后 state=listening，offline=true。
+  stderr 关键行（中文可能因终端编码显示乱码，但路径/英文标签正常）：
+    [hear] OFFLINE_MODEL path=... local_files_only=True
+    [hear] audio: resolving default speaker loopback
+    [hear] audio: default_speaker ...
+    [hear] audio: default_speaker ok
+    [hear] audio: get_microphone(...) ok
+    [hear] audio: all_microphones(include_loopback=True) ...
+    [hear] audio: all_microphones count = 4
+    [hear] audio: selected loopback device = '...'
+    [hear] audio: opening mic.recorder ...
+    [hear] audio: mic.recorder ok
+    [hear] audio: mic.recorder opened; capture loop started
+  结论：声卡获取正常，5s 防护不会误杀；若某步死锁会在 5s 抛 E_AUDIO_DEVICE。
+
+====================================================================
+4. 测试
+====================================================================
+Node 45/45（超时常量变更，无逻辑破坏）
+Python 59/59，新增 AudioDeviceTest：
+  - _audio_device_call 正常返回 42；
+  - 函数 sleep 0.3s、timeout=0.05 → HearAudioTimeout(E_AUDIO_DEVICE)
+    且消息含“超过”；
+  - _open_loopback 用 FakeSoundcard 选中 loopback mic；
+  - default_speaker 抛错 → HearError code E_AUDIO_DEVICE 且消息含原因。
+未验证：
+  - 真正声卡死锁场景（无法人为制造）；
+  - 真实音频播放后的转写文本（本次只到 listening）。
+
+====================================================================
+5. 重启验证
+====================================================================
+5.1 完全退出 DSH（无 python.exe/Electron 残留）→ 重开。
+5.2 [H] Hear → 「开启听觉」
+  预期 daemon stderr：
+    [hear] audio: default_speaker ...
+    [hear] audio: default_speaker ok
+    [hear] audio: all_microphones(include_loopback=True) ...
+    [hear] audio: all_microphones count = N
+    [hear] audio: selected loopback device = ...
+    [hear] audio: mic.recorder opened; capture loop started
+  1-8s 内绿 listening（预算 30s）。
+5.3 若声卡某步卡住：
+  5s 内应看到 `[hear] audio: TIMEOUT ...`；
+  UI 红灯，错误含 `E_AUDIO_DEVICE` + stderr。
+  不会再黄灯超过 30s。
+5.4 播放系统外放音频，等 2-5s：
+  [H] 出现转写 / vhcu_get_hear_events 有文本。
+5.5 如果仍无文本：
+  确认不是系统静音/耳机独占；查看 [H] 时间轴是否增长；
+  必要时用 5.2 的音频日志定位设备。
+
+====================================================================
+6. 文件改动
+====================================================================
+【新增】
+  VHCU-P12.2.6-01-Hear声卡防护与30s超时-20261101-1335.txt（本报告）
+【修改】
+  lib/index.js                 HEAR_START_TIMEOUT_MS 30000
+  vision/vhcu_daemon/hear.py   _audio_device_call/5s 超时；
+                               _open_loopback 日志与 E_AUDIO_DEVICE；
+                               mic.recorder 防护；错误前缀带 code
+  vision/tests/test_hear.py    AudioDeviceTest 3 项
+  package.json / dsh.plugin.json  0.16.5
+  README.md                    P12.2.6 声卡防护/30s/59 测试
+【备份】
+  lib/index.js.bak、vision/vhcu_daemon/hear.py.bak（本轮修改前）
+  package.json.bak、dsh.plugin.json.bak、README.md.bak
+
+====================================================================
+7. 已知边界
+====================================================================
+R1. 5s 上限按“每个声卡 API 调用”计算；正常一次启动总音频耗时通常 <1s。
+R2. _audio_device_call 用 daemon 线程等待，若底层 C 调用永久死锁，
+    该线程会残留到进程退出（无法从 Python 强杀 C 线程），
+    但主 Hear 线程会抛错、UI 红灯，不会卡黄灯。
+R3. 30s 预算包含模型加载与声卡获取；正常 1-8s。
+R4. taskkill 全量清场的风险/opt-out 同 P12.2.5（VHCU_KILL_ALL_PYTHON=0）。
+R5. 真实转写仍依赖系统正在播放声音。
+
+（报告完）
