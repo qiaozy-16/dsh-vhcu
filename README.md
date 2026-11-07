@@ -147,13 +147,17 @@ Recommended: use a virtual environment and point VHCU at its interpreter.
 py -3 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install -U pip
-python -m pip install -r requirements.txt
+python -m pip install -r requirements.txt -i https://mirrors.aliyun.com/pypi/simple/ --default-timeout=1000
 ```
+
+> **PSSecurityException / 权限拦截？** 如果激活虚拟环境时遇到 `PSSecurityException` 报错，请先在终端运行 `Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass` 解除限制，再重新执行 `Activate.ps1`。该设置只对当前终端进程生效。
+
+> **国内用户务必使用此命令，否则极易卡死。** 请优先使用上面的阿里云镜像命令；直接 `pip install` 官方源在国内网络下可能长时间无响应。
 
 If you do **not** use a venv, install into the same Python that `py -3` resolves:
 
 ```powershell
-py -3 -m pip install -r requirements.txt
+py -3 -m pip install -r requirements.txt -i https://mirrors.aliyun.com/pypi/simple/ --default-timeout=1000
 ```
 
 When using a venv, set `VHCU_PYTHON` to its `python.exe` **before starting DSH**:
@@ -177,7 +181,7 @@ Make it persistent for the user session:
 Install **`dsh-better-sidebar`** in the same profile first, then:
 
 ```powershell
-node scripts/install.mjs --profile desktop
+node scripts/install.mjs
 ```
 
 The installer creates a directory junction, adds `dsh-vhcu` to the profile bundle list, and writes the profile `package.json` atomically. Run with `--dry-run` to inspect, or `--uninstall` to reverse.
@@ -192,7 +196,10 @@ dsh-vhcu: mounted (routes /vhcu/state|events|control|frame|settings|macros)
 
 Hear is optional; vision and input work without it.
 
-**Option A — Releases offline pack (recommended):** download the `faster-whisper-base` model pack from the repository Releases page and place it at:
+> [!WARNING]
+> ⚠️ **国内从 GitHub Releases 下载可能极慢。强烈建议：直接在 VHCU 插件面板点击“开启听觉”，程序会自动通过国内镜像（hf-mirror.com）下载模型。**
+
+**Option A — Releases offline pack:** download the `faster-whisper-base` model pack from the repository Releases page and place it at:
 
 ```text
 dsh-vhcu/
