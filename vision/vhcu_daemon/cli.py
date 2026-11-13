@@ -23,13 +23,15 @@ import traceback
 from typing import Optional
 
 from . import PROTOCOL_VERSION, __version__
-from .hear import HearError, HearService
+from .drivers import DriverFactory
+from .hear import HearError
 from .httpframe import HttpFrameServer
-from .input import InputController, InputError
+from .input import InputError
+from .interrupts import InterruptController, InterruptError
+from .paths import resource_paths
 from .privacy import foreground_title
 from .protocol import MAX_LINE_BYTES, Protocol, ProtocolError, parse_line
 from .runner import MAX_FPS, Runner
-from .sources import available_sources
 
 
 def rss_bytes() -> Optional[int]:
@@ -92,6 +94,12 @@ class Daemon:
     def __init__(self, args: argparse.Namespace):
         self.args = args
         self.proto = Protocol(PROTOCOL_VERSION)
+        self.interrupt = InterruptController()
+        self.drivers = DriverFactory.create(
+            emit=lambda kind, **fields: self.proto.event(kind, **fields),
+            log=lambda message: print(f"vhcu-daemon: {message}", file=sys.stderr, flush=True),
+            interrupt=self.interrupt,
+        )
         self.runner = Runner(
             self.proto,
             width=args.width,
@@ -99,6 +107,7 @@ class Daemon:
             source=args.source,
             fps=args.fps,
             threshold=args.threshold,
+            source_factory=self.drivers.capture.create_source,
         )
         self.token = os.urandom(24).hex()
         self.server = HttpFrameServer(
@@ -106,13 +115,11 @@ class Daemon:
             self.token,
             port=0,
             max_width_default=args.max_width,
+            on_interrupt=self._on_interrupt,
         )
         self.started_at = time.time()
-        self.input = InputController()
-        self.hear = HearService(
-            lambda kind, **fields: self.proto.event(kind, **fields),
-            log=lambda message: print(f"vhcu-daemon: {message}", file=sys.stderr, flush=True),
-        )
+        self.input = self.drivers.input
+        self.hear = self.drivers.audio
         self._heartbeat_stop = threading.Event()
         self._heartbeat_thread: Optional[threading.Thread] = None
         self._closing = False
@@ -121,7 +128,7 @@ class Daemon:
 
     def run(self) -> int:
         port = self.server.start()
-        sources = available_sources()
+        sources = self.drivers.capture.available_sources()
         self.proto.ready(
             proto=PROTOCOL_VERSION,
             pid=os.getpid(),
@@ -261,9 +268,11 @@ class Daemon:
                     "platform": platform.platform(),
                     "protocol": PROTOCOL_VERSION,
                     "daemon": __version__,
-                    "sources": available_sources(),
+                    "sources": self.drivers.capture.available_sources(),
                     "cwd": os.getcwd(),
                     "input": self.input.status(),
+                    "paths": resource_paths(),
+                    "interrupt": self.interrupt.status(),
                 },
             )
             return True
@@ -416,17 +425,29 @@ class Daemon:
 
     # ── helpers ──────────────────────────────────────────────────────────
 
+    def _on_interrupt(self, reason: str, clear: bool = False) -> dict:
+        """Called by the loopback HTTP thread while the command loop may be blocked."""
+        if clear:
+            self.interrupt.clear()
+            self.proto.event("daemon.interrupt", cleared=True, reason=reason)
+        else:
+            self.interrupt.request(reason or "host-interrupt")
+            self.proto.event("daemon.interrupt", cleared=False, reason=self.interrupt.reason)
+        return {"interrupt": self.interrupt.status()}
+
     @staticmethod
     def _ime_shortcut(args: dict) -> str:
         value = str(args.get("imeShortcut") or "ctrl+space")
         return value if value in ("ctrl+space", "shift", "none") else "ctrl+space"
 
     def _input(self, action, expected_foreground=None):
-        """Run one input action, mapping InputError onto the wire error taxonomy."""
+        """Run one input action, mapping driver errors onto the wire taxonomy."""
         try:
             if expected_foreground:
                 self.input.assert_foreground(expected_foreground)
             return action()
+        except InterruptError as error:
+            raise ProtocolError(error.code, str(error), error.hint) from error
         except InputError as error:
             raise ProtocolError(error.code, str(error), error.hint) from error
 
@@ -507,6 +528,7 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     def _graceful(signum, _frame):
         try:
+            daemon.interrupt.request(f"signal-{signum}")
             daemon.shutdown(f"signal-{signum}")
         finally:
             os._exit(0)

@@ -65,6 +65,7 @@ export class Supervisor extends EventEmitter {
     this.daemonArgs = options.daemonArgs ?? ['-u', '-m', 'vhcu_daemon'];
     this.cwd = options.cwd ?? process.cwd();
     this.env = options.env ?? {};
+    this.resourcePaths = options.resourcePaths ?? null;
     this.spawnImpl = options.spawnImpl ?? nodeSpawn;
 
     this.readyTimeoutMs = options.readyTimeoutMs ?? C.READY_TIMEOUT_MS;
@@ -219,6 +220,42 @@ export class Supervisor extends EventEmitter {
     };
   }
 
+  /**
+   * Send a high-priority interrupt to the loopback HTTP plane. This deliberately
+   * bypasses the stdio command loop, which may be blocked in a macro right now.
+   */
+  async interrupt(reason = 'host-interrupt') {
+    return this._interruptRequest(reason, false);
+  }
+
+  /** Clear a previously raised soft interrupt after the user resumes. */
+  async clearInterrupt(reason = 'host-resume') {
+    return this._interruptRequest(reason, true);
+  }
+
+  async _interruptRequest(reason, clear) {
+    if (this.state !== 'ready' || hasExited(this.child)) return false;
+    const port = Number(this.readyInfo?.port);
+    const token = this.readyInfo?.token;
+    if (!port || !token) return false;
+    const query = new URLSearchParams({ token, reason: String(reason), ...(clear ? { clear: '1' } : {}) });
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 1500);
+    timer.unref?.();
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/interrupt?${query.toString()}`, {
+        method: 'POST',
+        signal: controller.signal,
+      });
+      return response.ok;
+    } catch (error) {
+      this.logger.debug('supervisor: interrupt request failed', error?.message ?? String(error));
+      return false;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   /** Recent stderr, oldest first (bounded). */
   stderrTail(limit = 20) {
     return this.stderrRing.slice(-limit);
@@ -351,6 +388,11 @@ export class Supervisor extends EventEmitter {
     env.PYTHONIOENCODING = 'utf-8';
     env.PYTHONUTF8 = '1';
     env.PYTHONPATH = [this.visionPath, env.PYTHONPATH].filter(Boolean).join(delimiter);
+    if (this.resourcePaths) {
+      env.VHCU_MODEL_PATH = this.resourcePaths.models;
+      env.VHCU_MACROS_PATH = this.resourcePaths.macros;
+      env.VHCU_LOG_DIR = this.resourcePaths.logs;
+    }
     return env;
   }
 

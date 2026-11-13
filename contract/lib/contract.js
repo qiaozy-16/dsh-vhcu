@@ -81,9 +81,10 @@ export const ERROR_CODES = Object.freeze({
   E_SEQ: { retryable: false, hint: 'seq 不连续：请求 snapshot 重新对齐，不要直接信任增量。' },
   E_VERSION: { retryable: false, hint: '协议版本不匹配：升级插件或 daemon。' },
   E_SHUTDOWN: { retryable: false, hint: 'daemon 正在退出。' },
+  E_INTERRUPTED: { retryable: true, hint: '操作已被用户中断：重新截图确认状态后再决定是否继续。' },
   E_CONFIRM_REQUIRED: {
     retryable: false,
-    hint: '破坏性快捷键需要用户确认：得到同意后传 confirm_destructive: true。',
+    hint: '敏感快捷键需要用户确认：得到同意后传 confirm_destructive: true。',
   },
 });
 

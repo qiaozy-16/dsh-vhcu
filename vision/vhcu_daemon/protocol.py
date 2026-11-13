@@ -31,6 +31,7 @@ ERROR_CODES = {
     "E_SEQ",
     "E_VERSION",
     "E_SHUTDOWN",
+    "E_INTERRUPTED",
 }
 
 

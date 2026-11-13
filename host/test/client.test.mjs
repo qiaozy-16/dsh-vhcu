@@ -296,6 +296,7 @@ test('P30 web client warns and disables desktop-only actions', () => {
   assert.match(source, /disabled: IS_WEB \|\| busy/);
   assert.match(source, /disabled: IS_WEB \|\| hearBusy/);
   assert.match(source, /disabled: IS_WEB \|\| recordingBusy/);
+  assert.match(source, /macroQueue\?\.status === 'hung'/);
   const readme = readFileSync(join(HERE, '..', '..', 'README.md'), 'utf8');
   assert.match(readme, /不支持 Web 网页端/);
 });

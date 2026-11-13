@@ -29,7 +29,9 @@
                 "E_INTERNAL",
                 "E_SEQ",
                 "E_VERSION",
-                "E_SHUTDOWN"
+                "E_SHUTDOWN",
+                "E_INTERRUPTED",
+                "E_CONFIRM_REQUIRED"
               ]
             },
             "message": { "type": "string", "minLength": 1 },

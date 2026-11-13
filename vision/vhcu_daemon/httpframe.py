@@ -68,6 +68,7 @@ class HttpFrameServer:
         host: str = "127.0.0.1",
         port: int = 0,
         max_width_default: int = 960,
+        on_interrupt=None,
     ):
         if not token:
             raise ValueError("token is required")
@@ -76,6 +77,7 @@ class HttpFrameServer:
         self._host = host
         self._requested_port = port
         self._max_width_default = max(64, int(max_width_default))
+        self._on_interrupt = on_interrupt
         self._server: Optional[ThreadingHTTPServer] = None
         self._thread: Optional[threading.Thread] = None
         self._semaphore = threading.Semaphore(MAX_INFLIGHT)
@@ -117,6 +119,18 @@ class HttpFrameServer:
             return
         if parsed.path == "/health":
             self._json(handler, 200, {"ok": True, "uptimeMs": int((time.time() - self._started_at) * 1000)})
+            return
+        if parsed.path == "/interrupt":
+            if handler.command != "POST":
+                self._json(handler, 405, {"ok": False, "error": "POST required"})
+                return
+            if self._on_interrupt is None:
+                self._json(handler, 503, {"ok": False, "error": "interrupt channel unavailable"})
+                return
+            reason = str(params.get("reason", ["host-interrupt"])[0] or "host-interrupt")
+            clear = str(params.get("clear", [""])[0]).lower() in ("1", "true", "yes")
+            result = self._on_interrupt(reason, clear)
+            self._json(handler, 200, {"ok": True, **(result or {})})
             return
         if parsed.path == "/frame":
             if not self._semaphore.acquire(blocking=False):
@@ -171,6 +185,20 @@ def _make_handler(server: HttpFrameServer):
         protocol_version = "HTTP/1.1"
 
         def do_GET(self) -> None:  # noqa: N802
+            try:
+                server.handle(self)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            except Exception as error:  # noqa: BLE001
+                try:
+                    self.send_response(500)
+                    self.send_header("content-length", "0")
+                    self.end_headers()
+                except Exception:  # noqa: BLE001
+                    pass
+                print(f"vhcu-daemon: http handler error: {error}", flush=True)
+
+        def do_POST(self) -> None:  # noqa: N802
             try:
                 server.handle(self)
             except (BrokenPipeError, ConnectionResetError):

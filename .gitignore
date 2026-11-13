@@ -14,7 +14,15 @@ macros.json
 **/macros.json
 
 # ── Backups / logs / temp ───────────────────────────────────────
+# Never commit local safety copies, editor backups, or extracted backups.
 *.bak
+*.bak-*
+*.orig
+*.save
+*~
+backup/
+backups/
+*backup*/
 *.log
 *.tmp
 logs/

@@ -23,6 +23,7 @@
             "E_SEQ",
             "E_VERSION",
             "E_SHUTDOWN",
+            "E_INTERRUPTED",
             "E_CONFIRM_REQUIRED"
           ]
         },

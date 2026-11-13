@@ -19,7 +19,9 @@ import threading
 import time
 from ctypes import wintypes
 
+from .interrupts import InterruptController, InterruptError
 from .privacy import foreground_identity
+from .safety import InvalidScreen, clamp_point, in_screen_corner, normalize_point
 
 IS_WINDOWS = os.name == "nt"
 ULONG_PTR = ctypes.c_ulonglong if ctypes.sizeof(ctypes.c_void_p) == 8 else ctypes.c_ulong
@@ -235,29 +237,23 @@ def cursor_position() -> tuple[int, int]:
 
 
 def in_corner(x: int, y: int, width: int, height: int, margin: int = CORNER_PX) -> bool:
-    """pyautogui.FAILSAFE equivalent: any screen corner means stop."""
-    if width <= 0 or height <= 0:
-        return False
-    left = x <= margin
-    right = x >= width - 1 - margin
-    top = y <= margin
-    bottom = y >= height - 1 - margin
-    return (left or right) and (top or bottom)
+    """pyautogui.FAILSAFE equivalent; implementation lives in safety.py."""
+    return in_screen_corner(x, y, width, height, margin)
 
 
 def clamp_click(x: int, y: int, width: int, height: int) -> tuple[int, int, bool]:
     """P14: clamp any coordinate into the primary screen instead of failing."""
-    if width <= 1 or height <= 1:
-        raise InputError("E_UNAVAILABLE", "primary screen size is unavailable")
-    cx = min(max(0, int(x)), width - 1)
-    cy = min(max(0, int(y)), height - 1)
-    return cx, cy, (cx != int(x) or cy != int(y))
+    try:
+        return clamp_point(x, y, width, height)
+    except InvalidScreen as error:
+        raise InputError("E_UNAVAILABLE", "primary screen size is unavailable") from error
 
 
 def normalize_click(x: int, y: int, width: int, height: int) -> tuple[int, int]:
-    if width <= 1 or height <= 1:
-        raise InputError("E_UNAVAILABLE", "primary screen size is unavailable")
-    cx, cy, _ = clamp_click(x, y, width, height)
+    try:
+        cx, cy = normalize_point(x, y, width, height)
+    except InvalidScreen as error:
+        raise InputError("E_UNAVAILABLE", "primary screen size is unavailable") from error
     # SendInput absolute coordinates are normalized to 0..65535 over the screen.
     return (int(round(cx * 65535 / (width - 1))), int(round(cy * 65535 / (height - 1))))
 
@@ -319,18 +315,20 @@ def ime_open_status() -> bool | None:
 
 
 class InputController:
-    def __init__(self, dry_run: bool | None = None):
+    def __init__(self, dry_run: bool | None = None, interrupt: InterruptController | None = None):
         self.dry_run = (os.environ.get("VHCU_INPUT_DRY_RUN") == "1") if dry_run is None else dry_run
         self.dpi_mode = enable_dpi_awareness()
         self.width, self.height = primary_size()
         self._lock = threading.RLock()
         self._sent: list[float] = []
+        self.interrupt = interrupt or InterruptController()
 
     def status(self) -> dict:
         return {
             "dryRun": self.dry_run,
             "dpiMode": self.dpi_mode,
             "screen": {"width": self.width, "height": self.height},
+            "interrupt": self.interrupt.status(),
         }
 
     def assert_foreground(self, expected: dict | None) -> None:
@@ -666,7 +664,7 @@ class InputController:
                     nx = start[0] + round((end[0] - start[0]) * index / steps)
                     ny = start[1] + round((end[1] - start[1]) * index / steps)
                     self._send(self._mouse_input(nx, ny, MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE))
-                    time.sleep(0.01)
+                    self._sleep(0.01)
             finally:
                 self._send(self._mouse_input(end[0], end[1], MOUSEEVENTF_LEFTUP))
             return {
@@ -703,7 +701,7 @@ class InputController:
                     nx = start[0] + round((end[0] - start[0]) * index / steps)
                     ny = start[1] + round((end[1] - start[1]) * index / steps)
                     self._send(self._mouse_input(nx, ny, MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE))
-                    time.sleep(0.008)
+                    self._sleep(0.008)
             finally:
                 self._send(self._mouse_input(end[0], end[1], MOUSEEVENTF_MIDDLEUP))
             return {
@@ -757,6 +755,7 @@ class InputController:
             for index, step in enumerate(resolved):
                 op = str(step.get("op") or "")
                 try:
+                    self.interrupt.check()
                     self._run_step(op, step)
                 except InputError as error:
                     raise InputError(
@@ -764,6 +763,8 @@ class InputController:
                         f"macro step {index + 1} ({op}) failed: {error}",
                         error.hint,
                     ) from error
+                except InterruptError:
+                    raise
                 except Exception as error:  # noqa: BLE001
                     raise InputError("E_MACRO_FAILED", f"macro step {index + 1} ({op}) failed: {error}") from error
                 executed.append(op)
@@ -878,7 +879,7 @@ class InputController:
                     self._mouse_input(nx, ny, MOUSEEVENTF_LEFTDOWN),
                     self._mouse_input(nx, ny, MOUSEEVENTF_LEFTUP),
                 )
-                time.sleep(0.05)
+                self._sleep(0.05)
             return
         if op == "right_click":
             x = int(step.get("x"))
@@ -921,7 +922,7 @@ class InputController:
                     nx = start[0] + round((end[0] - start[0]) * index / 12)
                     ny = start[1] + round((end[1] - start[1]) * index / 12)
                     self._send(self._mouse_input(nx, ny, MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE))
-                    time.sleep(0.01)
+                    self._sleep(0.01)
             finally:
                 self._send(self._mouse_input(end[0], end[1], MOUSEEVENTF_LEFTUP))
             return
@@ -939,7 +940,7 @@ class InputController:
                     nx = start[0] + round((end[0] - start[0]) * index / 16)
                     ny = start[1] + round((end[1] - start[1]) * index / 16)
                     self._send(self._mouse_input(nx, ny, MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE))
-                    time.sleep(0.008)
+                    self._sleep(0.008)
             finally:
                 self._send(self._mouse_input(end[0], end[1], MOUSEEVENTF_MIDDLEUP))
             return
@@ -947,7 +948,7 @@ class InputController:
             ms = int(step.get("ms"))
             if not (0 <= ms <= 5000):
                 raise InputError("E_PROTO", "wait ms must be within 0..5000")
-            time.sleep(ms / 1000.0)
+            self._sleep(ms / 1000.0)
             return
         raise InputError("E_PROTO", f"unsupported macro op {op!r}")
 
@@ -964,7 +965,11 @@ class InputController:
                 "把鼠标移离屏幕四角后重试；这是人工急停通道",
             )
 
+    def _sleep(self, seconds: float) -> None:
+        self.interrupt.sleep(seconds)
+
     def _rate_limit(self) -> None:
+        self.interrupt.check()
         now = time.monotonic()
         self._sent = [stamp for stamp in self._sent if now - stamp <= RATE_WINDOW_S]
         if len(self._sent) >= RATE_MAX:

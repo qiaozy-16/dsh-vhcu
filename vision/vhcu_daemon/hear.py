@@ -157,15 +157,14 @@ def _audio_device_call(label: str, func, timeout: float = AUDIO_DEVICE_TIMEOUT):
 
 
 def default_model_dir() -> Path:
-    """Never write model files to the C: user cache by default.
+    """Return the host-injected absolute model root.
 
-    VHCU_MODEL_PATH wins; otherwise <plugin root>/models (sibling of lib/,
-    vision/), e.g. <repo>/models.
+    Node always injects VHCU_MODEL_PATH (absolute); the paths helper also
+    provides an absolute repo-relative default for standalone tests. No cwd or
+    relative path is ever consulted here.
     """
-    env = os.environ.get("VHCU_MODEL_PATH")
-    if env:
-        return Path(env).expanduser().resolve()
-    return Path(__file__).resolve().parents[2] / "models"
+    from .paths import models_dir
+    return models_dir()
 
 
 def local_offline_model_dir(model_root=None) -> Path | None:
@@ -540,8 +539,9 @@ def _open_loopback(sc):
 
 
 class HearService:
-    def __init__(self, emit, log=None):
+    def __init__(self, emit, log=None, interrupt=None):
         self._emit_cb = emit
+        self._interrupt = interrupt
         self._log = log or (lambda message: None)
         self._lock = threading.Lock()
         self._thread: threading.Thread | None = None
@@ -830,6 +830,14 @@ class HearService:
             file=sys.stderr,
             flush=True,
         )
+        if self._interrupt is not None:
+            try:
+                self._interrupt.check()
+            except Exception:
+                self._emit("hear.status", status="interrupted", **self.status())
+                return
+        if self._stop.is_set():
+            return
         try:
             segments, info = model.transcribe(
                 audio,

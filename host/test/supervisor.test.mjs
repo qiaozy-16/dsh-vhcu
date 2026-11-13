@@ -205,3 +205,24 @@ test('P17.4 heartbeat timeout automatically respawns the daemon', async () => {
     await supervisor.stop('cleanup');
   }
 });
+
+test('P1 supervisor injects absolute resource paths into the daemon env', async () => {
+  const resourcePaths = {
+    models: 'C:\vhcu\models',
+    macros: 'C:\Users\vhcu\macros.json',
+    logs: 'C:\Users\vhcu\logs',
+  };
+  const supervisor = new Supervisor({
+    python: { cmd: process.execPath, args: [FIXTURE] },
+    visionPath: HERE,
+    daemonArgs: [],
+    cwd: HERE,
+    resourcePaths,
+    logger: { debug() {}, info() {}, warn() {}, error() {} },
+  });
+  const env = supervisor._buildEnv();
+  assert.equal(env.VHCU_MODEL_PATH, resourcePaths.models);
+  assert.equal(env.VHCU_MACROS_PATH, resourcePaths.macros);
+  assert.equal(env.VHCU_LOG_DIR, resourcePaths.logs);
+  await supervisor.dispose();
+});

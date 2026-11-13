@@ -29,8 +29,10 @@ PRIVACY_BLOCKED_HINT = (
 
 class Runner:
     def __init__(self, proto: Protocol, *, width: int = 320, height: int = 180,
-                 source: str = "fake", fps: float = 8.0, threshold: int = 14):
+                 source: str = "fake", fps: float = 8.0, threshold: int = 14,
+                 source_factory=None):
         self.proto = proto
+        self._source_factory = source_factory or create_source
         self.defaults = {
             "source": source,
             "fps": max(0.5, min(float(fps), MAX_FPS)),
@@ -79,7 +81,7 @@ class Runner:
             if not (0.5 <= rate <= MAX_FPS):
                 raise ProtocolError("E_PROTO", f"fps must be within 0.5..{MAX_FPS}")
             try:
-                source = create_source(
+                source = self._source_factory(
                     name,
                     width=self.defaults["width"],
                     height=self.defaults["height"],
