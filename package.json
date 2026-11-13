@@ -1,6 +1,6 @@
 {
   "name": "dsh-vhcu",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "private": true,
   "description": "DSH-VHCU — on-demand vision + computer-use for DeepSeek Harness: privacy blackout, focus/frame guards, resilient Hear, 100-step macros, twenty-four tools.",
   "type": "module",

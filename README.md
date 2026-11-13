@@ -5,7 +5,7 @@ Local-first screen understanding, system-audio transcription, and safe Windows i
 
 **Repository:** [github.com/qiaozy-16/dsh-vhcu](https://github.com/qiaozy-16/dsh-vhcu)
 
-![version](https://img.shields.io/badge/version-1.0.0-4d6bfe)
+![version](https://img.shields.io/badge/version-1.0.1-4d6bfe)
 ![platform](https://img.shields.io/badge/platform-Windows%2010%2F11-0078D6)
 ![node](https://img.shields.io/badge/node-%3E%3D20-339933)
 ![python](https://img.shields.io/badge/python-%3E%3D3.10-3776AB)
@@ -82,6 +82,18 @@ It is intentionally **not** a cloud automation service. The only expected networ
 - sensitive-operation approval modal, no `window.confirm`;
 - recording strip with `🔴 开始录制宏` / `⏹ 停止并保存`.
 
+### V1.0.1 platform boundary
+
+| Area | What changed |
+|---|---|
+| Platform drivers | `DriverFactory` selects `InputBackend`, `CaptureBackend` and `AudioBackend`; Windows adapters wrap the existing SendInput/mss/SoundCard code. |
+| Responsive interrupt | Token-protected loopback `POST /interrupt`; soft pause and emergency shutdown can interrupt a running macro or Hear step; new `E_INTERRUPTED` error. |
+| Absolute path sandbox | Node injects absolute `VHCU_MODEL_PATH`, `VHCU_MACROS_PATH` and `VHCU_LOG_DIR`; Python rejects relative values instead of resolving against the process CWD. |
+| Release packaging | PyInstaller onedir bundle with full Hear runtime closure; no onefile extraction into `%TEMP%`. |
+
+This release does not add a macOS/Linux implementation. Windows behavior and
+the existing safety model remain the reference implementation.
+
 ---
 
 ## Architecture
@@ -93,6 +105,8 @@ flowchart LR
     S --> C[VHCU UI Client<br/>lib/client.js]
     D --> N[VHCU Node Host<br/>lib/index.js]
     N -->|NDJSON over stdio| P[Python Daemon<br/>vision/vhcu_daemon]
+    N -->|POST /interrupt| P
+    N -.->|absolute model/macro/log paths| P
     P --> SC[mss / BitBlt capture]
     P --> IN[SendInput keyboard / mouse]
     P --> HR[Hear pipeline]
@@ -129,77 +143,74 @@ flowchart LR
 
 ## Installation
 
-### 1. Clone and install Node dependencies
+V1.0.1 is distributed as a **GitHub Releases zip**. The zip is the supported
+install path: no `git clone`, no `npm install`, and no manual `pip install`
+build step. Extract it to a permanent folder and register it once.
 
-```powershell
-git clone https://github.com/qiaozy-16/dsh-vhcu.git dsh-vhcu
-cd dsh-vhcu
-npm install
+See [RELEASE_NOTES.md](RELEASE_NOTES.md) for the V1.0.1 change list.
+
+### 1. Download the Release bundle
+
+Download `dsh-vhcu-v1.0.1.zip` from the
+[Releases](https://github.com/qiaozy-16/dsh-vhcu/releases) page.
+
+Do **not** run the plugin from the Downloads folder. Extract the bundle to a
+stable location, for example:
+
+```text
+%LOCALAPPDATA%\dsh-vhcu\
 ```
 
-`npm install` also installs the optional `uiohook-napi` native dependency. If that native build is unavailable, the core vision/input tools still work, but global user-takeover detection and macro recording are degraded.
+The V1.0.1 bundle includes:
 
-### 2. Install Python dependencies
+- the plugin host/client (`lib/`, `host/`, `contract/`, `vision/`, `scripts/`);
+- the prebuilt onedir daemon under `dist/vhcu-daemon/`;
+- the Node runtime pieces and Python/Hear dependency closure needed by that
+  build.
 
-Recommended: use a virtual environment and point VHCU at its interpreter.
+### 2. Install the required sidebar host
 
-```powershell
-py -3 -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install -U pip
-python -m pip install -r requirements.txt -i https://mirrors.aliyun.com/pypi/simple/ --default-timeout=1000
-```
+Install and enable **`dsh-better-sidebar`** in the same DSH profile first.
+VHCU will not render a usable panel without a sidebar host.
 
-> **PSSecurityException / 权限拦截？** 如果激活虚拟环境时遇到 `PSSecurityException` 报错，请先在终端运行 `Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass` 解除限制，再重新执行 `Activate.ps1`。该设置只对当前终端进程生效。
+### 3. Register VHCU with DSH
 
-> **国内用户务必使用此命令，否则极易卡死。** 请优先使用上面的阿里云镜像命令；直接 `pip install` 官方源在国内网络下可能长时间无响应。
-
-If you do **not** use a venv, install into the same Python that `py -3` resolves:
-
-```powershell
-py -3 -m pip install -r requirements.txt -i https://mirrors.aliyun.com/pypi/simple/ --default-timeout=1000
-```
-
-When using a venv, set `VHCU_PYTHON` to its `python.exe` **before starting DSH**:
-
-```powershell
-$env:VHCU_PYTHON = (Resolve-Path .\.venv\Scripts\python.exe).Path
-```
-
-Make it persistent for the user session:
-
-```powershell
-[Environment]::SetEnvironmentVariable(
-  'VHCU_PYTHON',
-  (Resolve-Path .\.venv\Scripts\python.exe).Path,
-  'User'
-)
-```
-
-### 3. Install the plugin into a DSH profile
-
-Install **`dsh-better-sidebar`** in the same profile first, then:
+Open a terminal in the extracted folder and run the included installer once:
 
 ```powershell
 node scripts/install.mjs
 ```
 
-The installer creates a directory junction, adds `dsh-vhcu` to the profile bundle list, and writes the profile `package.json` atomically. Run with `--dry-run` to inspect, or `--uninstall` to reverse.
+Use `--profile <name>` for a non-default profile, `--dry-run` to inspect the
+plan, or `--uninstall` to reverse it:
 
-Fully restart DSH after installation. The host log should include:
+```powershell
+node scripts/install.mjs --profile desktop
+node scripts/install.mjs --dry-run
+node scripts/install.mjs --uninstall
+```
+
+The installer only registers the extracted folder with the DSH profile
+(directory junction, dependency entry and `dsh.profile.bundles`). It does not
+download source or compile dependencies.
+
+### 4. Restart DSH
+
+Fully restart the DSH desktop app. The host log should contain:
 
 ```text
 dsh-vhcu: mounted (routes /vhcu/state|events|control|frame|settings|macros)
 ```
 
-### 4. Download the Hear model (optional, only for Hear)
+### 5. Download the Hear model (optional, only for Hear)
 
 Hear is optional; vision and input work without it.
 
 > [!WARNING]
 > ⚠️ **国内从 GitHub Releases 下载可能极慢。强烈建议：直接在 VHCU 插件面板点击“开启听觉”，程序会自动通过国内镜像（hf-mirror.com）下载模型。**
 
-**Option A — Releases offline pack:** download the `faster-whisper-base` model pack from the repository Releases page and place it at:
+**Option A — Releases offline pack:** download the `faster-whisper-base` model
+pack from the repository Releases page and place it at:
 
 ```text
 dsh-vhcu/
@@ -211,11 +222,15 @@ dsh-vhcu/
       vocabulary.txt
 ```
 
-`models/` is git-ignored. The daemon loads it with `local_files_only=True` and makes no network request.
+`models/` is git-ignored. The daemon loads it with `local_files_only=True` and
+makes no network request.
 
-**Option B — automatic HF mirror download:** leave `models/faster-whisper-base/` absent. On first `vhcu_start_hear`, VHCU forces `HF_ENDPOINT=https://hf-mirror.com` and lets faster-whisper download the base model into `models/`.
+**Option B — automatic HF mirror download:** leave
+`models/faster-whisper-base/` absent. On first `vhcu_start_hear`, VHCU forces
+`HF_ENDPOINT=https://hf-mirror.com` and lets faster-whisper download the base
+model into `models/`.
 
-Override the model directory with:
+Override the model directory only when you need a custom location:
 
 ```powershell
 $env:VHCU_MODEL_PATH = 'D:\path\to\models'
@@ -334,8 +349,11 @@ Turbo mode (after enabling it in Settings):
 
 | Variable | Purpose |
 |---|---|
-| `VHCU_PYTHON` | Absolute path to the Python interpreter used by the daemon |
-| `VHCU_MODEL_PATH` | Model root; defaults to `<plugin>/models` |
+| `VHCU_PYTHON` | Optional absolute path to a custom Python interpreter |
+| `VHCU_MODEL_PATH` | Absolute model root; defaults to `<plugin>/models` |
+| `VHCU_MACROS_PATH` | Absolute `macros.json` path injected by the host |
+| `VHCU_LOG_DIR` | Absolute log directory contract injected by the host |
+| `VHCU_MACRO_ACK_TIMEOUT_MS` | Macro queue acknowledgement deadline; default `45000` |
 | `VHCU_INPUT_DRY_RUN=1` | Validate input calls without injecting |
 | `VHCU_DISABLE_USER_TAKEOVER=1` | Disable global user-takeover watcher (tests/automation) |
 | `VHCU_KILL_ALL_PYTHON=0` | Do not kill orphan `python.exe` on Hear-only start |
@@ -362,11 +380,17 @@ dsh-vhcu/
 │  └─ test/                 # contract tests
 ├─ vision/
 │  ├─ vhcu_daemon/          # Python daemon: capture, input, Hear, protocol
-│  └─ tests/                # Python test suite
+│  │  ├─ drivers/           # InputBackend / CaptureBackend / AudioBackend
+│  │  ├─ paths.py           # absolute resource path contract
+│  │  └─ interrupts.py      # cooperative interrupt channel
+│  ├─ tests/                # Python test suite
+│  └─ vhcu_daemon.spec      # PyInstaller onedir build spec
+├─ dist/vhcu-daemon/        # release build (gitignored)
 ├─ scripts/install.mjs      # DSH profile installer
 ├─ models/                  # local model files (ignored)
 ├─ macros.json              # private macros (ignored)
 ├─ requirements.txt
+├─ RELEASE_NOTES.md
 ├─ .gitignore
 └─ README.md
 ```
@@ -376,8 +400,8 @@ dsh-vhcu/
 ## Development
 
 ```powershell
-npm test          # Node: 97 tests
-npm run test:py   # Python: 100 tests
+npm test          # Node: 103 tests
+npm run test:py   # Python: 111 tests
 ```
 
 Useful commands:
