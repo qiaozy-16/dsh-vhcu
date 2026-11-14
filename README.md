@@ -163,8 +163,7 @@ dsh-vhcu-win-x64-v1.0.1-full.zip
 ```
 
 > [!IMPORTANT]
-> 请下载带 **`-full.zip`** 的完整包，不要下载单独的引擎包。完整包已经包含
-> `scripts/install.mjs`；单独引擎包解压后没有这个安装脚本，无法按本文流程注册。
+> 请下载带 `-full.zip` 的完整包。完整包已经包含 `scripts/install.mjs` 及所有运行依赖，解压后即可按本文流程注册。
 
 完整包内已经包含：
 
@@ -193,10 +192,10 @@ dsh-vhcu-win-x64-v1.0.1-full.zip
 node scripts/install.mjs
 ```
 
-如果你的 DSH profile 不是默认的 `desktop`，使用：
+如果您的 DSH profile 不是默认的，请使用 `--profile` 参数指定（例如 `--profile desktop`）：
 
 ```powershell
-node scripts/install.mjs --profile <你的 profile 名>
+node scripts/install.mjs --profile desktop
 ```
 
 可选：
@@ -206,9 +205,7 @@ node scripts/install.mjs --dry-run    # 只查看计划，不写入
 node scripts/install.mjs --uninstall  # 卸载注册
 ```
 
-该脚本只做三件事：创建目录 junction、写入 profile 依赖、把
-`dsh-vhcu` 加入 `dsh.profile.bundles`。它**不会**执行 `npm install`，
-也不会执行 `pip install`。
+该脚本只做三件事：创建目录 junction、将 `dsh-vhcu` 写入 `dsh.profile.bundles`、加入依赖。它绝对不会执行 `npm install` 或 `pip install`。
 
 #### 3. 完全重启 DSH
 
