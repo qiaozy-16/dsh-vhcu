@@ -147,93 +147,102 @@ command and by the DSH host.
 
 ## Installation
 
-> **两种安装方式只能选一种。**
-> 普通用户请下载完整包；只有需要修改源码或自行构建的开发者才使用源码流程。
+> **Pick one path.**
+> Normal users install the full Release bundle. Source builds are for developers
+> who need to modify or rebuild VHCU.
 
-### 普通用户：极简安装
+See [RELEASE_NOTES.md](RELEASE_NOTES.md) for the V1.0.1 change list.
 
-适用于只想使用 VHCU、不修改源码、不手动配置 Python 的用户。
+### For Users: Zero-Dependency Install
 
-#### 1. 下载完整包
+For normal use: no source edits, no Python environment, no package manager, and
+no build step.
 
-前往 [Releases](https://github.com/qiaozy-16/dsh-vhcu/releases)，下载：
+#### 1. Download the full bundle
 
-```text
-dsh-vhcu-win-x64-v1.0.1-full.zip
-```
+Get `dsh-vhcu-win-x64-v1.0.1-full.zip` from
+[Releases](https://github.com/qiaozy-16/dsh-vhcu/releases).
 
 > [!IMPORTANT]
-> 请下载带 `-full.zip` 的完整包。完整包已经包含 `scripts/install.mjs` 及所有运行依赖，解压后即可按本文流程注册。
+> Use the `-full.zip` bundle. It ships `scripts/install.mjs` and every runtime
+> dependency; unpack it and follow the steps below.
 
-完整包内已经包含：
+The full bundle contains:
 
-- 插件源码：`lib/`、`host/`、`contract/`、`vision/`；
-- 前端依赖：`node_modules/`；
-- 编译好的独立引擎：`dist/vhcu-daemon/`；
-- 离线 Hear 模型：`models/`；
-- 一次性注册脚本：`scripts/install.mjs`。
+- plugin source: `lib/`, `host/`, `contract/`, `vision/`;
+- frontend dependencies: `node_modules/`;
+- the compiled standalone engine: `dist/vhcu-daemon/`;
+- the offline Hear model: `models/`;
+- the one-shot registration script: `scripts/install.mjs`.
 
-将 Zip 解压到一个**永久目录**，例如：
+Extract the ZIP to a permanent directory, for example:
 
 ```text
 %LOCALAPPDATA%\dsh-vhcu\
 ```
 
-不要在 `Downloads` 临时目录里直接运行插件；移动或清理下载目录后，DSH 会找不到插件。
+Do not run VHCU from `Downloads`. Moving or cleaning that directory later will
+break the DSH plugin link.
 
-#### 2. 运行一次注册脚本
+#### 2. Register once
 
-先确认同一个 DSH profile 中已经安装并启用
-**`dsh-better-sidebar`**。VHCU 的面板依赖这个侧边栏宿主。
+Install and enable **`dsh-better-sidebar`** in the same DSH profile first. VHCU's
+panel requires a sidebar host.
 
-在解压后的目录中打开 PowerShell，运行一次：
+From the extracted directory, run once:
 
 ```powershell
 node scripts/install.mjs
 ```
 
-如果您的 DSH profile 不是默认的，请使用 `--profile` 参数指定（例如 `--profile desktop`）：
+If your DSH profile is not the default, pass `--profile` explicitly (for
+example, `--profile desktop`):
 
 ```powershell
 node scripts/install.mjs --profile desktop
 ```
 
-可选：
+Optional:
 
 ```powershell
-node scripts/install.mjs --dry-run    # 只查看计划，不写入
-node scripts/install.mjs --uninstall  # 卸载注册
+node scripts/install.mjs --dry-run    # inspect the plan; write nothing
+node scripts/install.mjs --uninstall  # remove the registration
 ```
 
-该脚本只做三件事：创建目录 junction、将 `dsh-vhcu` 写入 `dsh.profile.bundles`、加入依赖。它绝对不会执行 `npm install` 或 `pip install`。
+The script performs exactly three actions: it creates a directory junction,
+writes `dsh-vhcu` into `dsh.profile.bundles`, and adds the profile dependency.
+It never runs `npm install` or `pip install`.
 
-#### 3. 完全重启 DSH
+#### 3. Restart DSH
 
-关闭并重新启动 DSH 桌面应用（不是只刷新页面）。启动日志中应出现：
+Quit and relaunch the DSH desktop app. A page refresh is not enough. The host
+log should contain:
 
 ```text
 dsh-vhcu: mounted (routes /vhcu/state|events|control|frame|settings|macros)
 ```
 
-重启后，在侧边栏打开 **VHCU** 即可。
+Open **VHCU** in the sidebar after the restart.
 
-#### 4. Hear 模型（国内网络备选）
+#### 4. Hear model (offline fallback)
 
-完整包已经包含 `models/`，正常使用不需要额外下载模型。如果模型缺失，或者
-自动下载很慢，可以：
+The full bundle already contains `models/`; normal use does not require a
+separate model download. If the model is missing, or the automatic download is
+slow, do this:
 
-1. 在同一个 Releases 页面下载 `models.zip`；
-2. 解压后得到 `models/` 目录；
-3. 用它覆盖解压目录中的 `models/`；
-4. 重启 DSH，无需重新运行 `npm install` 或 `pip install`。
+1. Download `models.zip` from the same Releases page;
+2. extract it to get a `models/` directory;
+3. overwrite the extracted bundle's `models/` with it;
+4. restart DSH. No `npm install` or `pip install` is required.
 
-`models/` 是本地运行数据，不要提交到 Git。
+`models/` is local runtime data and must not be committed to Git.
 
-### 开发者：源码构建
+### For Developers: Source Build
 
-本节只供二次开发和自定义构建使用。普通用户请使用上面的完整包。
+This path exists for secondary development and custom builds. Normal users
+should use the full bundle above.
 
-#### 1. 克隆源码并安装 Node 依赖
+#### 1. Clone the source and install Node dependencies
 
 ```powershell
 git clone https://github.com/qiaozy-16/dsh-vhcu.git dsh-vhcu
@@ -242,10 +251,11 @@ cd dsh-vhcu
 npm install
 ```
 
-`npm install` 会安装可选的 `uiohook-napi` 原生依赖。如果原生模块构建失败，
-视觉和输入核心仍可用，但全局用户接管检测和宏录制会降级。
+`npm install` also installs the optional `uiohook-napi` native dependency. If
+that native build is unavailable, the core vision and input tools still work,
+but global user-takeover detection and macro recording are degraded.
 
-#### 2. 安装 Python 依赖并指定解释器
+#### 2. Install Python dependencies and select the interpreter
 
 ```powershell
 py -3 -m venv .venv
@@ -254,22 +264,23 @@ python -m pip install -U pip
 python -m pip install -r requirements.txt -i https://mirrors.aliyun.com/pypi/simple/ --default-timeout=1000
 ```
 
-> **PSSecurityException / 权限拦截？** 如果激活虚拟环境时报
-> `PSSecurityException`，先在当前终端运行：
+> **PSSecurityException / execution policy?** If activating the virtual
+> environment fails with `PSSecurityException`, run this in the current
+> PowerShell session first:
 >
 > ```powershell
 > Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 > ```
 >
-> 该设置只对当前 PowerShell 进程生效。
+> The change applies only to the current PowerShell process.
 
-让 DSH 使用这个虚拟环境：
+Point DSH at this virtual environment:
 
 ```powershell
 $env:VHCU_PYTHON = (Resolve-Path .\.venv\Scripts\python.exe).Path
 ```
 
-需要持久化时：
+To persist the setting for the current user:
 
 ```powershell
 [Environment]::SetEnvironmentVariable(
@@ -279,23 +290,24 @@ $env:VHCU_PYTHON = (Resolve-Path .\.venv\Scripts\python.exe).Path
 )
 ```
 
-#### 3. 注册到 DSH
+#### 3. Register with DSH
 
 ```powershell
 node scripts/install.mjs
 ```
 
-然后完全重启 DSH。开发环境仍然需要 `dsh-better-sidebar`。
+Then fully restart DSH. The development setup still requires
+`dsh-better-sidebar`.
 
-#### 4. 手动打包独立引擎 / Release 包
+#### 4. Manual engine / Release packaging
 
-源码开发完成后，可以用 PyInstaller spec 生成 onedir 引擎：
+Build the onedir engine with the PyInstaller spec:
 
 ```powershell
 pyinstaller --clean vision/vhcu_daemon.spec
 ```
 
-产物位于：
+Output:
 
 ```text
 dist/vhcu-daemon/
@@ -303,20 +315,21 @@ dist/vhcu-daemon/
   _internal/
 ```
 
-需要生成完整分发包时，应将以下内容一起打包：
+To assemble a complete distribution bundle, package the following together:
 
 ```text
 lib/  host/  contract/  vision/  scripts/
 dist/vhcu-daemon/
-models/                    # 可选；完整包需要
-node_modules/              # 普通用户完整包需要
+models/                    # optional; required for the full bundle
+node_modules/              # required by the normal-user full bundle
 package.json
 dsh.plugin.json
 assets/icon.png
 ```
 
-普通用户只需要下载最终的 `dsh-vhcu-win-x64-<version>-full.zip`，不需要执行
-本节中的任何命令。
+Normal users only download the final
+`dsh-vhcu-win-x64-<version>-full.zip`; none of the commands in this section
+are required for them.
 
 ---
 

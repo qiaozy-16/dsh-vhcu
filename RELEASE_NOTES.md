@@ -81,13 +81,15 @@ and interrupt safely, and it closes the remaining offline-release gaps.
 
 ## Upgrade notes
 
-1. Download the V1.0.1 Release zip and extract it to a permanent folder.
+1. Download `dsh-vhcu-win-x64-v1.0.1-full.zip` from Releases and extract it to
+   a permanent folder.
 2. Keep `dsh-better-sidebar` installed/enabled in the same DSH profile.
 3. Run the included installer once and fully restart DSH.
 4. Existing `macros.json` and model directories can be reused; no migration is
    required.
-5. The packaged daemon does not bundle model weights. Use the offline
-   `faster-whisper-base` Release asset or the built-in HF mirror download.
+5. The full bundle already contains `models/`. If you use an engine-only build
+   or need to refresh the offline pack, download `models.zip` from Releases and
+   extract it over the existing `models/` directory.
 
 ## Known limitations
 
