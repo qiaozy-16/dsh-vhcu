@@ -147,33 +147,28 @@ command and by the DSH host.
 
 ## Installation
 
-> **Pick one path.**
-> Normal users install the full Release bundle. Source builds are for developers
-> who need to modify or rebuild VHCU.
+There are two paths. Regular users should install the full release package. Source code building is for developers who need to modify or rebuild VHCU.
 
-See [RELEASE_NOTES.md](RELEASE_NOTES.md) for the V1.0.1 change list.
+For a list of changes in V1.0.1, please refer to [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
-### For Users: Zero-Dependency Install
+### For Users: Zero-Dependency Installation
 
-For normal use: no source edits, no Python environment, no package manager, and
-no build step.
+Normal usage requires no source code modification, no Python environment, no package manager, and no build steps.
 
-#### 1. Download the full bundle
+#### 1. Download the Complete Package
 
-Get `dsh-vhcu-win-x64-v1.0.1-full.zip` from
-[Releases](https://github.com/qiaozy-16/dsh-vhcu/releases).
+Get it from [Releases](https://github.com/qiaozy-16/dsh-vhcu/releases). Download `dsh-vhcu.zip`.
 
 > [!IMPORTANT]
-> Use the `-full.zip` bundle. It ships `scripts/install.mjs` and every runtime
-> dependency; unpack it and follow the steps below.
+> Please use this complete package. It includes all necessary dependencies and the pre-built engine. Unpack it and follow the steps below.
 
-The full bundle contains:
+The complete package includes:
 
-- plugin source: `lib/`, `host/`, `contract/`, `vision/`;
-- frontend dependencies: `node_modules/`;
-- the compiled standalone engine: `dist/vhcu-daemon/`;
-- the offline Hear model: `models/`;
-- the one-shot registration script: `scripts/install.mjs`.
+- Plugin source code: `lib/`, `host/`, `contract/`, `vision/`
+- Frontend dependencies: `node_modules/`
+- Compiled standalone engine: `dist/vhcu-daemon/`
+- Offline Hear model: `models/`
+- One-time registration script: `scripts/install.mjs`
 
 Extract the ZIP to a permanent directory, for example:
 
@@ -181,155 +176,46 @@ Extract the ZIP to a permanent directory, for example:
 %LOCALAPPDATA%\dsh-vhcu\
 ```
 
-Do not run VHCU from `Downloads`. Moving or cleaning that directory later will
-break the DSH plugin link.
+Do not run the plugin directly from a temporary directory. Moving or cleaning up the download directory will cause DSH to lose track of the plugin.
 
-#### 2. Register once
+#### 2. Run the Registration Script
 
-Install and enable **`dsh-better-sidebar`** in the same DSH profile first. VHCU's
-panel requires a sidebar host.
+First, ensure `dsh-better-sidebar` is installed and enabled in the same DSH profile. VHCU's panel relies on this sidebar host.
 
-From the extracted directory, run once:
+Open PowerShell in the extracted directory and run once:
 
 ```powershell
 node scripts/install.mjs
 ```
 
-If your DSH profile is not the default, pass `--profile` explicitly (for
-example, `--profile desktop`):
+If your DSH profile is not the default, use the `--profile` parameter:
 
 ```powershell
-node scripts/install.mjs --profile desktop
+node scripts/install.mjs --profile <your_profile_name>
 ```
 
 Optional:
 
 ```powershell
-node scripts/install.mjs --dry-run    # inspect the plan; write nothing
-node scripts/install.mjs --uninstall  # remove the registration
+node scripts/install.mjs --dry-run    # View plan only, do not write
+node scripts/install.mjs --uninstall  # Uninstall
 ```
 
-The script performs exactly three actions: it creates a directory junction,
-writes `dsh-vhcu` into `dsh.profile.bundles`, and adds the profile dependency.
-It never runs `npm install` or `pip install`.
+This script only does three things: creates a directory junction, adds `dsh-vhcu` to `dsh.profile.bundles`, and adds dependencies. It will **never** run `npm install` or `pip install`.
 
 #### 3. Restart DSH
 
-Quit and relaunch the DSH desktop app. A page refresh is not enough. The host
-log should contain:
+Close and restart the DSH desktop app (not just refresh the page). You should see this in the startup log:
 
 ```text
 dsh-vhcu: mounted (routes /vhcu/state|events|control|frame|settings|macros)
 ```
 
-Open **VHCU** in the sidebar after the restart.
+After restarting, open VHCU in the sidebar.
 
-#### 4. Hear model (offline fallback)
+#### 4. Hear Model (Optional)
 
-The full bundle already contains `models/`; normal use does not require a
-separate model download. If the model is missing, or the automatic download is
-slow, do this:
-
-1. Download `models.zip` from the same Releases page;
-2. extract it to get a `models/` directory;
-3. overwrite the extracted bundle's `models/` with it;
-4. restart DSH. No `npm install` or `pip install` is required.
-
-`models/` is local runtime data and must not be committed to Git.
-
-### For Developers: Source Build
-
-This path exists for secondary development and custom builds. Normal users
-should use the full bundle above.
-
-#### 1. Clone the source and install Node dependencies
-
-```powershell
-git clone https://github.com/qiaozy-16/dsh-vhcu.git dsh-vhcu
-cd dsh-vhcu
-
-npm install
-```
-
-`npm install` also installs the optional `uiohook-napi` native dependency. If
-that native build is unavailable, the core vision and input tools still work,
-but global user-takeover detection and macro recording are degraded.
-
-#### 2. Install Python dependencies and select the interpreter
-
-```powershell
-py -3 -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install -U pip
-python -m pip install -r requirements.txt -i https://mirrors.aliyun.com/pypi/simple/ --default-timeout=1000
-```
-
-> **PSSecurityException / execution policy?** If activating the virtual
-> environment fails with `PSSecurityException`, run this in the current
-> PowerShell session first:
->
-> ```powershell
-> Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
-> ```
->
-> The change applies only to the current PowerShell process.
-
-Point DSH at this virtual environment:
-
-```powershell
-$env:VHCU_PYTHON = (Resolve-Path .\.venv\Scripts\python.exe).Path
-```
-
-To persist the setting for the current user:
-
-```powershell
-[Environment]::SetEnvironmentVariable(
-  'VHCU_PYTHON',
-  (Resolve-Path .\.venv\Scripts\python.exe).Path,
-  'User'
-)
-```
-
-#### 3. Register with DSH
-
-```powershell
-node scripts/install.mjs
-```
-
-Then fully restart DSH. The development setup still requires
-`dsh-better-sidebar`.
-
-#### 4. Manual engine / Release packaging
-
-Build the onedir engine with the PyInstaller spec:
-
-```powershell
-pyinstaller --clean vision/vhcu_daemon.spec
-```
-
-Output:
-
-```text
-dist/vhcu-daemon/
-  vhcu-daemon.exe
-  _internal/
-```
-
-To assemble a complete distribution bundle, package the following together:
-
-```text
-lib/  host/  contract/  vision/  scripts/
-dist/vhcu-daemon/
-models/                    # optional; required for the full bundle
-node_modules/              # required by the normal-user full bundle
-package.json
-dsh.plugin.json
-assets/icon.png
-```
-
-Normal users only download the final
-`dsh-vhcu-win-x64-<version>-full.zip`; none of the commands in this section
-are required for them.
+The complete package already includes the `models/` directory, so no extra download is normally needed. If the model is missing or automatic download is slow, you can manually download `models.zip` from Releases and extract it to the root directory.
 
 ---
 
