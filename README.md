@@ -1,7 +1,7 @@
 # VHCU
 
 **Vision · Hearing · Computer Use for DeepSeek Harness**  
-Local-first screen understanding, system-audio transcription, and safe Windows input automation — exposed as 24 tools and a sidebar panel.
+Local-first screen understanding, system-audio transcription, and safe Windows input automation — exposed as 28 tools and a sidebar panel.
 
 **Repository:** [github.com/qiaozy-16/dsh-vhcu](https://github.com/qiaozy-16/dsh-vhcu)
 
@@ -29,7 +29,7 @@ VHCU is a DeepSeek Harness plugin for **local multimodal computer use**:
 
 - captures the primary screen and turns visual differences into structured events;
 - transcribes **system playback audio** (not the microphone) with a local faster-whisper model;
-- exposes 24 model-callable tools for observation, clicking, typing, hotkeys, dragging, and macro replay;
+- exposes 28 model-callable tools for observation, window capture, UIA element search, clicking, typing, hotkeys, dragging, shape drawing, and macro replay;
 - fuses vision and hearing into a single 1.5-second multimodal timeline;
 - keeps screenshots, audio, coordinates, and macros on the local machine.
 
@@ -55,9 +55,14 @@ It is intentionally **not** a cloud automation service. The only expected networ
 
 | Group | Tools |
 |---|---|
-| Vision | `vhcu_start_vision`, `vhcu_stop_vision`, `vhcu_get_vision_events`, `vhcu_get_full_frame` |
+| Vision | `vhcu_start_vision`, `vhcu_stop_vision`, `vhcu_get_vision_events`, `vhcu_get_full_frame`, `vhcu_capture_target` |
+| UIA | `vhcu_find_elements`、`vhcu_click_element`（`uiautomation>=2.0.29`，Windows） |
 | Context | `vhcu_get_active_window`, `vhcu_get_recommended_macros` |
 | Input | `vhcu_mouse_click`, `vhcu_type_text`, `vhcu_key_press`, `vhcu_mouse_scroll`, `vhcu_mouse_drag`, `vhcu_mouse_middle_drag` |
+| Shape drawing | `vhcu_draw_shape` / `input.draw_shape` generates 16–512 high-density parabola/sine/cosine points; virtual path keeps `MK_LBUTTON` on every move; physical path uses 1 ms micro-delays |
+| Humanized input | optional `humanize_profile` (`off` / `precise` / `balanced`); balanced `clamp(80+0.15d,100,350)ms` cubic Bezier + jitter, precise 30-80ms, virtual 80-120ms, Turbo auto-downgrades to precise; UIA InvokePattern does not move the mouse |
+| Virtual cursor | `cursorInjectionMode` (`physical` / `virtual` / `hybrid`); Win32 `PostMessage` client-coordinate injection with DPI mapping; Python layered click-through overlay; hybrid only falls back before the first queued message |
+| Persistent settings | `settings.json` in `%LOCALAPPDATA%\dsh-vhcu` (override `VHCU_SETTINGS_PATH`); atomic temp+rename save, defaults merge on load, visible persistence errors |
 | Macros | `vhcu_save_macro`, `vhcu_run_macro`, `vhcu_macro_open_notepad_and_type`, `vhcu_macro_save_file` |
 | Recording | `vhcu_start_recording`, `vhcu_stop_recording` |
 | Clipboard | `vhcu_set_memory_clipboard`, `vhcu_get_memory_clipboard` |
@@ -78,7 +83,7 @@ It is intentionally **not** a cloud automation service. The only expected networ
 
 - Single sidebar panel with Vision / Action / Hear / Fusion tabs;
 - collapsible **常规设置**, **高级调试**, **高级设置** sections;
-- soft-pause banner: `👀 您正在接管键鼠，AI 已暂停` — real user input pauses AI injection and resumes 1.5 s after the user stops;
+- soft-pause banner: `👀 您正在接管键鼠，AI 已暂停` — real user input pauses AI injection and resumes 1.5 s after the user stops (Turbo mode: 50 ms + automatic frame refresh);
 - sensitive-operation approval modal, no `window.confirm`;
 - recording strip with `🔴 开始录制宏` / `⏹ 停止并保存`.
 
@@ -216,6 +221,101 @@ After restarting, open VHCU in the sidebar.
 #### 4. Hear Model (Optional)
 
 The complete package already includes the `models/` directory, so no extra download is normally needed. If the model is missing or automatic download is slow, you can manually download `models.zip` from Releases and extract it to the root directory.
+
+### Build from Source (Developers)
+
+Use this path when you want to modify VHCU or rebuild the Python engine. The release ZIP is still the recommended installation for normal users.
+
+**Prerequisites**
+
+- Windows 10/11 x64
+- Node.js **20 or newer** (Node.js 24 is recommended)
+- Python **3.10 or newer** (64-bit; `py -3` must resolve to it)
+- Git for Windows
+- PowerShell 7 (or Windows PowerShell 5.1)
+
+#### 1. Clone the Repository
+
+```powershell
+git clone https://github.com/qiaozy-16/dsh-vhcu.git
+cd dsh-vhcu
+```
+
+#### 2. Install Node Dependencies
+
+```powershell
+npm install
+```
+
+`uiohook-napi` is optional. If its native ABI does not match your Electron/Node runtime, the core vision and input tools still work; only global recording and user-takeover detection require it.
+
+#### 3. Create the Python Virtual Environment
+
+```powershell
+py -3 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install --upgrade pip
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+```
+
+The daemon needs `mss` and `numpy`; Hear additionally needs `soundcard`, `webrtcvad-wheels`, and `faster-whisper`. UIA element search needs `uiautomation`.
+
+#### 4. Build the Standalone Python Engine
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install pyinstaller
+.\.venv\Scripts\pyinstaller.exe --clean vision/vhcu_daemon.spec
+```
+
+The onedir bundle is written to:
+
+```text
+dist\vhcu-daemon\vhcu-daemon.exe
+```
+
+Verify the build:
+
+```powershell
+Get-ChildItem .\dist\vhcu-daemon
+```
+
+The spec deliberately does **not** bundle the Hear model. Keep the offline model pack in `models\`; the host passes its absolute path to the daemon at runtime. The `dist\vhcu-daemon\` onedir folder is the release artifact; development runs use the interpreter configured through `VHCU_PYTHON`.
+
+#### 5. Register the Plugin with DSH
+
+From the repository root, run:
+
+```powershell
+node scripts/install.mjs
+```
+
+If your DSH profile is not the default:
+
+```powershell
+node scripts/install.mjs --profile <your_profile_name>
+```
+
+For source-only development without building the PyInstaller bundle, point the plugin at the virtual environment instead:
+
+```powershell
+$env:VHCU_PYTHON = (Resolve-Path .\.venv\Scripts\python.exe).Path
+```
+
+The registration script itself never runs `npm install`, `pip install`, or the build; it only links the plugin and updates the DSH profile.
+
+#### 6. Restart DSH
+
+Close and restart the DSH desktop app. Confirm the startup log contains:
+
+```text
+dsh-vhcu: mounted (routes /vhcu/state|events|control|frame|settings|macros)
+```
+
+For a quick developer check, place the `.venv` Python on `VHCU_PYTHON`, start DSH, and run:
+
+```powershell
+npm test
+npm run test:py
+```
 
 ---
 
@@ -382,8 +482,8 @@ dsh-vhcu/
 ## Development
 
 ```powershell
-npm test          # Node: 103 tests
-npm run test:py   # Python: 111 tests
+npm test          # Node: 116 tests
+npm run test:py   # Python: 216 tests
 ```
 
 Useful commands:
@@ -406,6 +506,7 @@ Test suites use `VHCU_INPUT_DRY_RUN=1` and mock Python/audio inputs; they do not
 | `E_UNAVAILABLE` on Hear start | Install requirements; confirm `soundcard`, `webrtcvad-wheels`, `faster-whisper`, `numpy` are in the interpreter selected by `VHCU_PYTHON`. |
 | Hear downloads forever | Use the Releases offline model pack; check `models/faster-whisper-base/model.bin`. |
 | `E_PRIVACY_BLOCKED` | The foreground window matched the privacy blacklist. Switch away or adjust the blacklist; do not use external screenshot fallback. |
+| `E_UIA_UNAVAILABLE` on `vhcu_find_elements` | Install `uiautomation>=2.0.29` (and its `comtypes` dependency) in the interpreter selected by `VHCU_PYTHON`; restart the daemon. |
 | `E_STATE` after an action | Read back with `vhcu_get_vision_events` / `vhcu_get_full_frame`, or enable Turbo and pass `skip_readback: true` deliberately. |
 | `uiohook-napi` install fails | Core tools still work; user-takeover and recording are unavailable. Use a supported Node/Electron ABI or rebuild the native module. |
 | Blender ignores `vhcu_type_text` | Pass `use_clipboard_fallback: true`; VHCU temporarily uses the clipboard and restores it. |
