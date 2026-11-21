@@ -7,6 +7,7 @@
  * against the process cwd (important for PyInstaller and future app bundles).
  */
 
+import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
 
@@ -26,27 +27,48 @@ function dataRoot(env) {
   return env.LOCALAPPDATA || env.XDG_DATA_HOME || join(homedir(), '.local', 'share');
 }
 
+function profileToken(env, explicit) {
+  const raw = String(
+    explicit ?? env.DSH_PROFILE_KEY ?? env.DSH_PROFILE ?? env.DSH_PROFILE_DIR ?? '',
+  ).trim();
+  if (!raw) return '';
+  // Never put a user-controlled profile name/path directly into a filesystem
+  // path; a stable hash keeps names like `../x` harmless.
+  return createHash('sha256').update(raw).digest('hex').slice(0, 16);
+}
+
 /**
- * Resolve the three absolute resource paths passed to the Python daemon.
+ * Resolve the three absolute resource paths passed to the Python daemon plus
+ * the Node-owned persistent settings path.
  * Defaults preserve the pre-P1 Windows locations exactly.
  *
- * @param {{root: string, env?: Record<string,string|undefined>, data?: string}} options
- * @returns {{models: string, macros: string, logs: string}}
+ * @param {{root: string, env?: Record<string,string|undefined>, data?: string, profile?: string}} options
+ * @returns {{models: string, macros: string, logs: string, settings: string, sessionState: string}}
  */
-export function resolveRuntimePaths({ root, env = process.env, data } = {}) {
+export function resolveRuntimePaths({ root, env = process.env, data, profile } = {}) {
   if (!root) throw new TypeError('resolveRuntimePaths requires root');
   const base = resolve(root);
   const dataDir = data ? resolve(data) : resolve(dataRoot(env));
+  const scope = profileToken(env, profile);
+  // Keep models/logs shared; only user state (settings/macros/session) is
+  // per-profile. Without a profile token preserve the legacy single path.
+  const stateDir = scope ? join(dataDir, 'dsh-vhcu', 'profiles', scope) : join(dataDir, 'dsh-vhcu');
   return Object.freeze({
     models: env.VHCU_MODEL_PATH
       ? absolute(env.VHCU_MODEL_PATH, 'VHCU_MODEL_PATH')
       : join(base, 'models'),
     macros: env.VHCU_MACROS_PATH
       ? absolute(env.VHCU_MACROS_PATH, 'VHCU_MACROS_PATH')
-      : join(dataDir, 'dsh-vhcu', 'macros.json'),
+      : join(stateDir, 'macros.json'),
     logs: env.VHCU_LOG_DIR
       ? absolute(env.VHCU_LOG_DIR, 'VHCU_LOG_DIR')
       : join(dataDir, 'dsh-vhcu', 'logs'),
+    settings: env.VHCU_SETTINGS_PATH
+      ? absolute(env.VHCU_SETTINGS_PATH, 'VHCU_SETTINGS_PATH')
+      : join(stateDir, 'settings.json'),
+    sessionState: env.VHCU_SESSION_STATE_PATH
+      ? absolute(env.VHCU_SESSION_STATE_PATH, 'VHCU_SESSION_STATE_PATH')
+      : join(stateDir, 'session_state.json'),
   });
 }
 

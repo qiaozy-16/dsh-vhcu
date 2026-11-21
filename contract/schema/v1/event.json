@@ -19,6 +19,9 @@
             "vision.blocked",
             "daemon.log",
             "daemon.bye",
+            "daemon.interrupt",
+            "daemon.memory_watermark",
+            "cursor.overlay_error",
             "hear.status",
             "hear.text",
             "hear.audio"
@@ -42,8 +45,16 @@
         },
         {
           "properties": {
-            "kind": { "enum": ["vision.status", "daemon.log", "daemon.bye"] }
+            "kind": { "enum": ["vision.status", "daemon.log", "daemon.bye", "cursor.overlay_error"] }
           }
+        },
+        {
+          "properties": { "kind": { "const": "daemon.interrupt" } },
+          "required": ["cleared", "reason"]
+        },
+        {
+          "properties": { "kind": { "const": "daemon.memory_watermark" } },
+          "required": ["rssBytes", "softBytes", "hardBytes"]
         },
         {
           "properties": { "kind": { "const": "vision.blocked" } },
@@ -68,6 +79,11 @@
     "source": { "enum": ["fake", "mss"] },
     "fps": { "type": "number", "minimum": 0, "maximum": 120 },
     "reason": { "type": "string", "minLength": 1 },
+    "cleared": { "type": "boolean" },
+    "rssBytes": { "type": "integer", "minimum": 0 },
+    "softBytes": { "type": "integer", "minimum": 0 },
+    "hardBytes": { "type": "integer", "minimum": 0 },
+    "message": { "type": "string" },
     "screen": {
       "type": "object",
       "required": ["width", "height", "scale"],

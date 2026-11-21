@@ -8,6 +8,8 @@ import {
   MACRO_RECOVERY_HINT,
   MAX_STEPS,
   MacroStore,
+  analyzeMacroReusability,
+  isMacroNotReusable,
   normalizeMacro,
   normalizeSteps,
   isHostWindowTitle,
@@ -142,6 +144,23 @@ test('category defaults, updates and legacy migration', () => {
     assert.deepEqual(updated.steps, [{ op: 'key', keys: ['win', 'e'] }]);
     assert.equal(updated.category, 'explorer');
     assert.equal(updated.enabled, true);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('built-in launch macro upgrades old 350ms wait from an existing store', () => {
+  const { dir, path } = tempStore();
+  try {
+    const store = new MacroStore({ path });
+    const raw = JSON.parse(readFileSync(path, 'utf8'));
+    const launch = raw.macros.find((macro) => macro.name === 'macro_launch_app');
+    launch.steps[1].ms = 350;
+    writeFileSync(path, JSON.stringify(raw));
+    const reloaded = new MacroStore({ path });
+    const upgraded = reloaded.find('macro_launch_app');
+    assert.ok(upgraded.steps[1].ms >= 500);
+    assert.equal(upgraded.is_destructive, false);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -343,4 +362,59 @@ test('P23 destructive macro field is seeded, persisted and normalized', () => {
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test('P8 raw coordinate recordings are rejected above 70 percent', () => {
+  const click = (x, y) => ({ op: 'click', x, y });
+  assert.equal(isMacroNotReusable([click(10, 20)]), true);
+  assert.equal(isMacroNotReusable([click(10, 20), click(30, 40)]), true);
+  assert.equal(
+    isMacroNotReusable([click(1, 1), click(2, 2), { op: 'type', text: 'x' }]),
+    false,
+    '2/3 is below the strict 70% threshold',
+  );
+  assert.equal(
+    isMacroNotReusable([click(1, 1), click(2, 2), click(3, 3), { op: 'wait', ms: 10 }]),
+    true,
+  );
+});
+
+test('P8 parameterized steps make a macro reusable', () => {
+  assert.equal(
+    isMacroNotReusable([{ op: 'click', x: '{{x}}', y: '{{y}}' }]),
+    false,
+    'placeholder coordinates are not raw clicks',
+  );
+  assert.equal(
+    isMacroNotReusable([
+      { op: 'click', x: 10, y: 20 },
+      { op: 'click', x: 30, y: 40 },
+      { op: 'type', text: '{{name}}' },
+    ]),
+    false,
+    '2/3 raw clicks is still below the threshold',
+  );
+  assert.equal(
+    isMacroNotReusable([
+      { op: 'click', x: 10, y: 20 },
+      { op: 'click', x: 30, y: 40 },
+      { op: 'click', x: 50, y: 60 },
+      { op: 'type', text: '{{name}}' },
+    ]),
+    true,
+    'a single variable must not launder a 75% coordinate recording',
+  );
+  const analysis = analyzeMacroReusability([
+    { op: 'click', x: 10, y: 20 },
+    { op: 'drag', x1: 1, y1: 2, x2: 3, y2: 4 },
+  ]);
+  assert.equal(analysis.rawClicks, 1);
+  assert.equal(analysis.ratio, 0.5);
+});
+
+test('P8 threshold is strict at exactly 70 percent', () => {
+  const click = (x, y) => ({ op: 'click', x, y });
+  const variables = Array.from({ length: 3 }, () => ({ op: 'type', text: '{{v}}' }));
+  assert.equal(isMacroNotReusable([...Array.from({ length: 7 }, (_, i) => click(i, i)), ...variables]), false);
+  assert.equal(isMacroNotReusable([...Array.from({ length: 8 }, (_, i) => click(i, i)), ...variables.slice(0, 2)]), true);
 });

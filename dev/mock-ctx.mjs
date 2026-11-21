@@ -3,8 +3,8 @@
  * dsh-vhcu plugin outside DSH (dev server + unit tests).
  *
  * It mirrors only the faces the plugin touches: webServer.register, effect,
- * on('dispose'), logger. Anything else stays undefined on purpose: if the
- * plugin grows a dependency on a real host service, the dev harness should
+ * on('dispose'), emit, logger. Anything else stays undefined on purpose: if
+ * the plugin grows a dependency on a real host service, the dev harness should
  * fail loudly instead of silently faking it.
  */
 
@@ -15,6 +15,7 @@ export function createMockCtx({ logger = console, label = 'vhcu-mock' } = {}) {
   const tools = new Map();
   const disposeHandlers = [];
   const disposers = [];
+  const emitted = [];
   let origin = '';
 
   const ctx = {
@@ -66,6 +67,9 @@ export function createMockCtx({ logger = console, label = 'vhcu-mock' } = {}) {
     on(event, handler) {
       if (event === 'dispose') disposeHandlers.push(handler);
     },
+    emit(event, payload) {
+      emitted.push({ event, payload });
+    },
   };
 
   const dispose = () => {
@@ -87,5 +91,5 @@ export function createMockCtx({ logger = console, label = 'vhcu-mock' } = {}) {
     tools.clear();
   };
 
-  return { ctx, routes, tools, dispose };
+  return { ctx, routes, tools, emitted, dispose };
 }

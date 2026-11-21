@@ -34,8 +34,8 @@ class WindowsCaptureBackend:
     def available_sources(self) -> list[str]:
         return available_sources()
 
-    def create_source(self, name: str, **options: Any):
-        return create_source(name, **options)
+    def create_source(self, name: str, *, target_hwnd: int | None = None, **options: Any):
+        return create_source(name, target_hwnd=target_hwnd, **options)
 
 
 class WindowsAudioBackend:

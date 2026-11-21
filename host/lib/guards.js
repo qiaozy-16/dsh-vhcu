@@ -17,8 +17,23 @@ export const IDLE_TIMEOUT_MS = 5 * 60 * 1000;
 export const IDLE_CHECK_MS = 15 * 1000;
 export const FRAME_MAX_AGE_MS = 1000;
 export const USER_TAKEOVER_RESUME_MS = 1500;
+/** Turbo mode: resume after a very short quiet window, not the normal guard delay. */
+export const USER_TAKEOVER_TURBO_RESUME_MS = 50;
 export const MEMORY_LIMIT_BYTES = 1.5 * 1024 * 1024 * 1024;
 export const MEMORY_CHECK_MS = 5000;
+
+export const HUMANIZE_PROFILES = Object.freeze(['off', 'precise', 'balanced']);
+
+/** Turbo keeps a humanization hint but never the 200–800ms balanced curve. */
+export function effectiveHumanizeProfile(profile, turboMode = false) {
+  if (profile !== 'precise' && profile !== 'balanced') return 'off';
+  return turboMode ? 'precise' : profile;
+}
+
+/** Soft-pause resume delay: normal anti-jitter guard vs Turbo instant resume. */
+export function userTakeoverResumeMs(turboMode = false) {
+  return turboMode ? USER_TAKEOVER_TURBO_RESUME_MS : USER_TAKEOVER_RESUME_MS;
+}
 
 function normalizeKeys(keys) {
   if (!Array.isArray(keys)) return [];
@@ -44,6 +59,20 @@ export function idleExpired(lastActivityAt, now = Date.now(), timeoutMs = IDLE_T
 /** P23: real user input pauses AI unless it is VHCU's own injection. */
 export function shouldPauseForUserTakeover(isAiInjecting, running) {
   return Boolean(running) && !isAiInjecting;
+}
+
+/**
+ * P1 8.10 — uiohook delivers our own injected key events asynchronously, so a
+ * trailing keyup can be dispatched after `isAiInjecting` has flipped false.
+ * Events inside this window are treated as leftovers, never as user takeover.
+ */
+export const AI_INJECTION_GRACE_MS = 150;
+
+/** True while input events still belong to the batch VHCU just injected. */
+export function inInjectionGraceWindow(now, graceUntil) {
+  const at = Number(now);
+  const until = Number(graceUntil);
+  return Number.isFinite(at) && Number.isFinite(until) && at < until;
 }
 
 /** P22.3: high-risk privacy bypass allows both capture and input injection. */

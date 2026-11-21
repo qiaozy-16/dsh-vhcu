@@ -69,6 +69,7 @@ class HttpFrameServer:
         port: int = 0,
         max_width_default: int = 960,
         on_interrupt=None,
+        frame_by_seq=None,
     ):
         if not token:
             raise ValueError("token is required")
@@ -78,6 +79,7 @@ class HttpFrameServer:
         self._requested_port = port
         self._max_width_default = max(64, int(max_width_default))
         self._on_interrupt = on_interrupt
+        self._frame_by_seq = frame_by_seq
         self._server: Optional[ThreadingHTTPServer] = None
         self._thread: Optional[threading.Thread] = None
         self._semaphore = threading.Semaphore(MAX_INFLIGHT)
@@ -148,7 +150,13 @@ class HttpFrameServer:
         return hmac.compare_digest(str(provided), self._token)
 
     def _frame(self, handler: BaseHTTPRequestHandler, params: dict) -> None:
-        frame = self._provider()
+        requested_seq = _int_param(params, "seq", 0)
+        if requested_seq > 0:
+            # A capture_target URL binds one exact frame_seq. Never fall back
+            # to the latest full-screen frame when the binding is missing.
+            frame = self._frame_by_seq(requested_seq) if self._frame_by_seq is not None else None
+        else:
+            frame = self._provider()
         if frame is None:
             self._json(handler, 404, {"ok": False, "error": "no frame captured yet"})
             return
@@ -167,8 +175,16 @@ class HttpFrameServer:
         handler.send_header("content-length", str(len(payload)))
         handler.send_header("cache-control", "no-store")
         handler.send_header("x-frame-size", f"{out_w}x{out_h}")
+        handler.send_header(
+            "x-frame-origin", f"{int(getattr(frame, 'origin_x', 0) or 0)},{int(getattr(frame, 'origin_y', 0) or 0)}",
+        )
+        handler.send_header("x-frame-backend", str(frame.backend))
+        handler.send_header("x-frame-blank", "1" if frame.blank else "0")
+        handler.send_header("x-frame-occluded", "1" if frame.occluded else "0")
+        handler.send_header("x-frame-seq", str(frame.frame_seq))
         handler.end_headers()
-        handler.wfile.write(payload)
+        if handler.command != "HEAD":
+            handler.wfile.write(payload)
 
     @staticmethod
     def _json(handler: BaseHTTPRequestHandler, status: int, body: dict) -> None:
@@ -185,6 +201,20 @@ def _make_handler(server: HttpFrameServer):
         protocol_version = "HTTP/1.1"
 
         def do_GET(self) -> None:  # noqa: N802
+            try:
+                server.handle(self)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            except Exception as error:  # noqa: BLE001
+                try:
+                    self.send_response(500)
+                    self.send_header("content-length", "0")
+                    self.end_headers()
+                except Exception:  # noqa: BLE001
+                    pass
+                print(f"vhcu-daemon: http handler error: {error}", flush=True)
+
+        def do_HEAD(self) -> None:  # noqa: N802
             try:
                 server.handle(self)
             except (BrokenPipeError, ConnectionResetError):

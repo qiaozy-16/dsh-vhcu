@@ -33,7 +33,9 @@ __pycache__/
 *.py[cod]
 *.pyo
 .venv/
+.venv-wheelcheck/
 venv/
+wheels/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/

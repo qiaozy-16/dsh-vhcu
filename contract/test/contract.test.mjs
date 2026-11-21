@@ -206,3 +206,30 @@ test('P17.4 heartbeat watchdog tolerates 10s of heavy work', () => {
   assert.equal(HEARTBEAT_MISS_LIMIT, 10);
   assert.equal(HEARTBEAT_MS * HEARTBEAT_MISS_LIMIT, 10_000);
 });
+
+test('P0.1 schema whitelists stay in sync with runtime OPS/ERROR_CODES', () => {
+  const schemas = loadSchemas();
+  const cmdEnum = schemas.get('vhcu:cmd:v1').allOf[1].properties.op.enum;
+  assert.deepEqual([...cmdEnum].sort(), [...OPS].sort(), 'cmd.json op enum drifted from OPS');
+  const errorEnum = schemas.get('vhcu:error:v1').allOf[1].properties.code.enum;
+  const ackEnum = schemas.get('vhcu:ack:v1').allOf[1].properties.error.properties.code.enum;
+  assert.deepEqual([...errorEnum].sort(), Object.keys(ERROR_CODES).sort(), 'error.json codes drifted');
+  assert.deepEqual([...ackEnum].sort(), Object.keys(ERROR_CODES).sort(), 'ack.json codes drifted');
+});
+
+test('P0.1 new daemon ops/events/errors are contract-valid', () => {
+  for (const op of ['uia.find', 'uia.click', 'uia.click_point', 'input.draw_shape', 'input.middle_drag']) {
+    const frame = cmdFrame({ seq: 1, id: 'c-1', op, args: {} });
+    assert.equal(validateFrame(frame).ok, true, `${op}: ${validateFrame(frame).errors?.join('; ')}`);
+  }
+  const event = (fields) => ({ v: PROTOCOL_VERSION, seq: 1, type: 'event', ts: 1, ...fields });
+  assert.equal(validateFrame(event({ kind: 'daemon.interrupt', cleared: false, reason: 'host-interrupt' })).ok, true);
+  assert.equal(validateFrame(event({ kind: 'daemon.memory_watermark', rssBytes: 1, softBytes: 2, hardBytes: 3 })).ok, true);
+  assert.equal(validateFrame(event({ kind: 'cursor.overlay_error', message: 'overlay failed' })).ok, true);
+  assert.equal(validateFrame(event({ kind: 'daemon.interrupt', reason: 'host-interrupt' })).ok, false);
+  for (const code of ['E_MEMORY', 'E_CLIPBOARD', 'E_AUDIO_DEVICE', 'E_FOCUS_LOST', 'E_MACRO_FAILED']) {
+    const frame = errorFrame({ seq: 1, code, message: 'x' });
+    const result = validateFrame(frame);
+    assert.equal(result.ok, true, `${code}: ${result.errors?.join('; ')}`);
+  }
+});

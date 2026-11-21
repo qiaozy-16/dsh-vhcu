@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import vm from 'node:vm';
@@ -39,7 +39,7 @@ function reactStub() {
   const createElement = (type, props, ...children) => ({ type, props: props ?? {}, children });
   return {
     createElement,
-    useState: (initial) => [initial, () => {}],
+    useState: (initial) => [typeof initial === 'function' ? initial() : initial, () => {}],
     useEffect: () => {},
     useCallback: (fn) => fn,
     useRef: () => ({ current: null }),
@@ -142,6 +142,13 @@ test('P16.7 settings exposes hear sensitivity levels', () => {
   assert.match(source, /vhcu-sensitivity/);
   assert.match(source, /严格（过滤噪音优先）/);
   assert.match(source, /灵敏（保留说话优先）/);
+});
+
+test('P6 settings Save posts the complete draft for persistence', () => {
+  const source = readFileSync(CLIENT, 'utf8');
+  assert.match(source, /fetch\(`\$\{API\}\/settings`/);
+  assert.match(source, /body: JSON\.stringify\(\{ settings: draft \}\)/);
+  assert.match(source, /设置保存到 settings\.json/);
 });
 
 test('P17.1 settings fields stack vertically with spacing', () => {
@@ -263,8 +270,19 @@ test('P23.1 auto-approve sensitive-operation macros has two-step confirmation an
 test('P24 Turbo mode setting and 100-step UI copy are present', () => {
   const source = readFileSync(CLIENT, 'utf8');
   assert.ok(source.includes('启用 Turbo 极速模式'));
-  assert.ok(source.includes('开启后速度大幅提升，但在极不稳定的界面可能因缺乏回读而产生误操作。'));
+  assert.ok(source.includes('用户软暂停后 50ms 即自动恢复并刷新截图'));
+  assert.ok(source.includes('极不稳定的界面可能因缺乏回读而产生误操作'));
   assert.match(source, /turboMode/);
+  assert.match(source, /humanizeProfile/);
+  assert.match(source, /vhcu-humanize/);
+  assert.match(source, /拟人化鼠标轨迹/);
+  assert.match(source, /balanced · 拟人曲线/);
+  assert.match(source, /Turbo 模式会自动降级为 precise/);
+  assert.match(source, /cursorInjectionMode/);
+  assert.match(source, /vhcu-cursor-mode/);
+  assert.match(source, /virtual 不抢物理鼠标/);
+  assert.match(source, /vhcu-cursor-warning/);
+  assert.match(source, /cursorWarning/);
   assert.match(source, /最多 100 步/);
   assert.match(source, /【常规设置】/);
   assert.match(source, /【高级调试】/);
@@ -272,15 +290,18 @@ test('P24 Turbo mode setting and 100-step UI copy are present', () => {
   assert.match(source, /建议保持默认设置/);
 });
 
-test('P26.7 plugin icons are fully removed from manifests and assets', () => {
+test('P26.7 plugin-list icon is configured; sidebar icons stay removed', () => {
   const source = readFileSync(CLIENT, 'utf8');
   assert.ok(!source.includes('vhcu-sidebar-icon'));
   assert.ok(!/icon:\s*\(size\)/.test(source));
   const root = join(HERE, '..', '..');
   const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
   const plugin = JSON.parse(readFileSync(join(root, 'dsh.plugin.json'), 'utf8'));
-  assert.equal(pkg.icon, undefined);
-  assert.equal(plugin.icon, undefined);
+  assert.equal(pkg.icon, 'assets/icon.png');
+  assert.equal(plugin.icon, 'assets/icon.png');
+  const icon = join(root, 'assets', 'icon.png');
+  assert.equal(existsSync(icon), true);
+  assert.ok(statSync(icon).size <= 256 * 1024, 'plugin-list icon must stay under 256 KiB');
   assert.equal(existsSync(join(root, 'lib', 'assets', 'icon.png')), false);
 });
 
@@ -298,5 +319,37 @@ test('P30 web client warns and disables desktop-only actions', () => {
   assert.match(source, /disabled: IS_WEB \|\| recordingBusy/);
   assert.match(source, /macroQueue\?\.status === 'hung'/);
   const readme = readFileSync(join(HERE, '..', '..', 'README.md'), 'utf8');
-  assert.match(readme, /不支持 Web 网页端/);
+  assert.match(readme, /cannot start the local Python engine or inject input/);
+});
+
+test('P7 recovery banner is top-level, explicit, and user-confirmed', () => {
+  const source = readFileSync(CLIENT, 'utf8');
+  assert.match(source, /vhcu-recovery-banner/);
+  assert.match(source, /发现未完成的宏任务/);
+  assert.match(source, /是否恢复/);
+  assert.match(source, /resolveRecovery\('resume'\)/);
+  assert.match(source, /resolveRecovery\('discard'\)/);
+  assert.match(source, /fetch\(`\$\{API\}\/recovery`/);
+  assert.match(source, /action, queueId/);
+  assert.ok(
+    source.indexOf('vhcu-recovery-banner') < source.indexOf("className: 'vhcu-tabs'"),
+    'recovery banner must render above the tabs',
+  );
+});
+
+test('V1.1 onboarding is a non-invasive three-step top guide', () => {
+  const source = readFileSync(CLIENT, 'utf8');
+  assert.match(source, /vhcu\.onboarding\.v1/);
+  assert.match(source, /首次使用 VHCU/);
+  assert.match(source, /开启视觉/);
+  assert.match(source, /检查权限/);
+  assert.match(source, /录第一个宏/);
+  assert.match(source, /localStorage/);
+  assert.match(source, /checkOnboardingPermissions/);
+  assert.match(source, /resolveRecovery/);
+  assert.doesNotMatch(source, /window\.confirm/);
+  assert.ok(
+    source.indexOf('vhcu-onboarding') < source.indexOf("className: 'vhcu-tabs'"),
+    'onboarding must render above tabs',
+  );
 });

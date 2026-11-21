@@ -547,6 +547,7 @@ class HearService:
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
         self._state = "idle"
+        self._unhealthy = False
         self._model = None
         self._deps = None
         self._last_error = None
@@ -612,10 +613,20 @@ class HearService:
     # ── lifecycle ──────────────────────────────────────────────────────
 
     def start(self) -> dict:
+        if self._unhealthy:
+            raise HearError(
+                "E_STATE",
+                "Hear 上次停止超时，线程可能仍占用音频/模型；请重启 daemon",
+            )
         # P12.2.4: release any previous Hear thread/model before starting a new one.
         if self._thread is not None and self._thread.is_alive():
             print("[hear] 检测到旧 Hear 线程，先停止并释放模型", file=sys.stderr, flush=True)
             self.stop()
+            if self._unhealthy:
+                raise HearError(
+                    "E_STATE",
+                    "Hear 线程未能在超时内停止，已拒绝重复启动；请重启 daemon",
+                )
         with self._lock:
             if self._thread is not None and self._thread.is_alive():
                 return self.status()
@@ -635,18 +646,27 @@ class HearService:
     def stop(self) -> dict:
         with self._lock:
             thread = self._thread
-            self._thread = None
-        if thread is None:
-            self._state = "idle"
-            return self.status()
+            if thread is None:
+                self._state = "idle"
+                return self.status()
         self._state = "stopping"
         self._stop.set()
         thread.join(timeout=8.0)
         if thread.is_alive():
-            self._last_error = "hear thread did not stop within 8s"
-        self._model = None
-        self._deps = None
-        self._state = "idle"
+            # Do not clear _thread/_model: the old thread still owns the audio
+            # device and model. Mark unhealthy so a second start is impossible.
+            with self._lock:
+                self._unhealthy = True
+                self._thread = thread
+                self._state = "error"
+                self._last_error = "hear thread did not stop within 8s"
+            self._emit("hear.status", status="error", error=self._last_error, **self.status())
+            return self.status()
+        with self._lock:
+            self._thread = None
+            self._model = None
+            self._deps = None
+            self._state = "idle"
         self._emit("hear.status", status="idle", error=self._last_error, **self.status())
         gc.collect()
         return self.status()

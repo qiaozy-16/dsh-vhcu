@@ -21,7 +21,7 @@
             "vision": { "type": "boolean" },
             "sources": {
               "type": "array",
-              "items": { "enum": ["fake", "mss"] },
+              "items": { "enum": ["fake", "mss", "window"] },
               "minItems": 1,
               "uniqueItems": true
             },

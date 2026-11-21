@@ -1,6 +1,6 @@
 # VHCU — Open Source Release Checklist
 
-Release: **v1.0.1**
+Release: **v1.1.0**
 Date: **2026-11-13**
 Scope: `dsh-vhcu/` only. Reports, temporary files, model weights, virtual
 environments, and `node_modules/` are not part of the repository.
@@ -60,7 +60,7 @@ outside this Git repository and are not tracked by `dsh-vhcu`.
 - [x] `RELEASE_NOTES.md` — V1.0.1 release notes and upgrade notes.
 - [x] `LICENSE` — MIT.
 - [x] `dsh.plugin.json` compatibility includes `0.2.1-rc.3`.
-- [x] Release version set to `1.0.1` in:
+- [x] Release version set to `1.1.0` in:
   - `package.json`
   - `dsh.plugin.json`
   - `package-lock.json` (root package)
@@ -98,8 +98,8 @@ Path contract in V1.0.1:
 
 Final suites after documentation changes:
 
-- **Node: 103/103 passing**
-- **Python: 111/111 passing**
+- **Node: 128/128 passing**
+- **Python: 225/225 passing**
 - **Contract: 14/14 passing**
 
 ```powershell
@@ -136,7 +136,7 @@ Additional packaging verification:
 Recommended release assets:
 
 ```text
-dsh-vhcu-v1.0.1.zip
+dsh-vhcu-v1.1.0.zip
   dsh-vhcu/
     lib/
     host/
@@ -187,8 +187,8 @@ Users extract the plugin zip to a permanent folder, run the included
 - [x] Repository URL set in README: `https://github.com/qiaozy-16/dsh-vhcu`.
 - [ ] Create the GitHub repository (if not already created).
 - [ ] Confirm the `dsh-better-sidebar` installation link/instructions for users.
-- [ ] Build and upload `dsh-vhcu-v1.0.1.zip` from the onedir release artifact.
-- [ ] Create a `v1.0.1` tag.
+- [ ] Build and upload `dsh-vhcu-v1.1.0.zip` from the onedir release artifact.
+- [ ] Create a `v1.1.0` tag.
 - [ ] Upload the offline `faster-whisper-base` pack as a Release asset.
 - [ ] Review the MIT copyright holder if you want a different attribution.
 - [ ] Optionally add screenshots/GIFs under `docs/` (not required).
@@ -201,12 +201,12 @@ Suggested commands:
 git status --short
 git add .
 git status
-git commit -m "release: VHCU v1.0.1"
+git commit -m "release: VHCU v1.1.0"
 git branch -M main
 git remote add origin https://github.com/qiaozy-16/dsh-vhcu.git
 git push -u origin main
-git tag v1.0.1
-git push origin v1.0.1
+git tag v1.1.0
+git push origin v1.1.0
 ```
 
 Before committing, verify no private artifacts are tracked:
@@ -238,6 +238,6 @@ Verification after DSH restart:
 
 ## 9. Final status
 
-**Ready for V1.0.1 publication.** Remaining release actions are repository
+**Ready for V1.1 publication.** Remaining release actions are repository
 creation, uploading the plugin zip and offline model asset, and creating the
-`v1.0.1` tag.
+`v1.1.0` tag.

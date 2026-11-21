@@ -1,102 +1,145 @@
-# VHCU V1.0.1 Release Notes
+# VHCU V1.1.0 Release Notes
 
-**Release date:** 2026-11-13  
-**Platform:** Windows 10/11 x64, DSH Desktop App only  
-**Previous release:** V1.0.0
+**Release date:** 2026-11-20
+**Platform:** Windows 10/11 x64, DSH Desktop App only
+**Engine:** `dist/vhcu-daemon/vhcu-daemon.exe` (PyInstaller onedir)
+**Plugin version:** 1.1.0
 
-V1.0.1 is a platform-boundary and packaging release. It does not change the
-normal Windows interaction model; it makes the daemon easier to move, package
-and interrupt safely, and it closes the remaining offline-release gaps.
+V1.1.0 is the release-hardening and interaction-quality release. It keeps the
+local-first architecture and the existing safety model, and adds precision
+capture, semantic UIA control, a non-intrusive virtual cursor, and stronger
+execution integrity.
 
-## Highlights
+## 2026-11-21 Post-acceptance hardening
 
-### Platform abstraction
+- `vhcu_get_memory_clipboard` now renders the stored text to the model instead
+  of only showing its character count.
+- `vhcu_find_elements` defaults to UIA depth 10, so Edge/Chromium page controls
+  are visible without an explicit `max_depth`.
+- Arrow and navigation keys are emitted with `KEYEVENTF_EXTENDEDKEY`; this fixes
+  `alt+left` navigation in Explorer.
+- The virtual cursor no longer strokes the enlarged glow triangle, removing the
+  stray white line below the pointer while retaining the solid cursor rim.
+- The shared settings store refreshes from disk and watches its directory, and
+  updates merge only fields that changed locally; stale windows no longer
+  overwrite another window's privacy/managed-mode choice.
 
-- Added explicit `InputBackend`, `CaptureBackend` and `AudioBackend` contracts.
-- Added `DriverFactory` with a single `sys.platform` decision point.
-- Extracted `WindowsInputDriver`, `WindowsCaptureDriver` and
-  `WindowsAudioDriver` adapters over the existing SendInput, mss and
-  SoundCard/faster-whisper implementations.
-- Existing Windows behavior is preserved; no macOS implementation is included
-  in this release.
+---
 
-### Immediate interrupt channel
+## Four Defining Capabilities
 
-- Added a token-protected loopback `POST /interrupt` channel.
-- The Node supervisor can interrupt a Python macro or Hear inference without
-  waiting for the blocked stdio command loop.
-- Soft pause (`paused_by_user`) and recovery now raise/clear the interrupt
-  cooperatively.
-- Added the `E_INTERRUPTED` protocol error and UI/error mapping.
-- Input macro steps and interruptible waits stop promptly; SIGINT/SIGTERM also
-  request an interrupt before shutdown.
+### Game War intelligent see-through
 
-### Absolute path sandbox
+- `vhcu_get_full_frame` and `vhcu_capture_target` accept `precision_mode`
+  (default `false`).
+- With the global **Allow high-precision vision** switch enabled (default on),
+  the capture returns 100% physical pixels: no PNG downscale,
+  `image_width == width`, `scale_factor == 1`.
+- A green **High-precision capture** indicator appears in the panel and clears
+  after 15 seconds, on the next normal capture, or when vision stops.
+- If the global switch is off, the tool returns normally with
+  `precision_denied: true` and an explicit message instead of pretending.
+- Intended for dense, fast-changing surfaces: game HUDs/combat views, CAD and
+  Blender viewports, charts, and small labels. No overlay, no injection into
+  protected processes, no anti-cheat bypass.
 
-- Node resolves and injects absolute `VHCU_MODEL_PATH`, `VHCU_MACROS_PATH` and
-  `VHCU_LOG_DIR` values into the Python daemon.
-- Python validates the injected paths and rejects relative values instead of
-  resolving against the process current directory.
-- `models`, `macros.json` and log locations are stable for packaged or
-  one-directory deployments, with no CWD-dependent fallback.
+### UIA semantic-level control
 
-### Macro queue acknowledgement and timeout
+- `vhcu_find_elements` returns opaque element tokens for Windows UI Automation
+  elements, with stale fingerprints and bounds checks.
+- `vhcu_click_element` prefers **InvokePattern**; elements without Invoke fall
+  back to their physical center.
+- New `uia` injection mode resolves the element under a screen point and invokes
+  it directly, falling back to a coordinate click only when required.
+- Password fields never expose `Value`; UIA discovery and invocation are blocked
+  on privacy-blacklisted target windows before any thread starts.
+- UIA timeouts mark the worker unhealthy and require a daemon restart instead of
+  retrying a stuck COM call.
 
-- Macro queue entries carry an explicit acknowledgement deadline
-  (`VHCU_MACRO_ACK_TIMEOUT_MS`, default 45000 ms).
-- A missing acknowledgement pauses the queue with `macroQueue.status = "hung"`.
-- The sidebar shows an alert instead of silently continuing later macros.
+### Background, non-intrusive virtual cursor
 
-### Packaging
+- `virtual` mode posts mouse messages to the target window without moving the
+  physical cursor; the layered click-through overlay shows the AI's virtual
+  position.
+- Chromium/Electron child surfaces are supported after real-world verification;
+  CEF and UWP shells stay in the PostMessage blocklist and `hybrid` falls back to
+  physical input.
+- Virtual mode no longer triggers the user-takeover soft pause, because physical
+  mouse movement is unrelated to the injected messages.
+- `hybrid` supports a per-call `preferred_method` on `vhcu_mouse_click`
+  (`physical` / `virtual` / `uia`).
 
-- Added a PyInstaller entry point and a maintained onedir spec.
-- Release daemon is built as `dist/vhcu-daemon/vhcu-daemon.exe` plus
-  `_internal/`; no onefile extraction into `%TEMP%`.
-- Bundled full Hear runtime dependencies: faster-whisper, ctranslate2,
-  onnxruntime, av, soundcard, webrtcvad-wheels, numpy, tokenizers and their
-  runtime closure.
-- Added explicit `excludes` for unused GUI/data-science modules (`tkinter`,
-  `pandas`, `matplotlib`, `scipy`, PyQt/PySide, wx, torch, TensorFlow,
-  scikit-learn, jupyter, pytest, notebook).
-- Kept required FFmpeg/ctranslate2/onnxruntime/OpenBLAS binaries; an attempt to
-  strip optional FFmpeg video encoders broke `av._core` and was reverted.
+### Resilience triad: recovery, precision, macro governance
 
-### Documentation and release
+- **Recovery:** `session_state.json` records macro-queue progress; the panel
+  offers Resume/Discard, now also on the web client. Image-relative queues are
+  discarded across restarts.
+- **Precision governance:** a global permission plus a live indicator, so the
+  user always sees when the model is using physical-pixel capture.
+- **Macro governance:** model-side macro self-generation is off by default;
+  `vhcu_save_macro` returns `E_MACRO_GENERATION_DISABLED` until the user enables
+  it, and the panel shows the interception notice.
+- **Execution integrity:** expired commands are refused before dispatch; orphaned
+  daemons are reclaimed through per-process PID records with strict identity
+  checks; modifiers and mouse buttons are force-released on startup and shutdown.
 
-- README now documents the Release zip as the supported installation path.
-- Added this `RELEASE_NOTES.md`.
-- Updated the open-source release checklist and `.gitignore` backup rules.
+---
 
-## Verification
+## Additional Improvements
 
-- Node test suite: **103/103**
-- Python test suite: **111/111**
-- Contract suite: **14/14**
-- PyInstaller onedir build: successful
-- Packaged daemon READY: successful
-- Packaged HTTP `/interrupt`: `200`, `interrupt.set = true`
-- Packaged `sys.info` paths: absolute and identical to injected values
-- Packaged Hear dependency import: `hear.start` acknowledged successfully
-- `pip check`: no broken requirements
+- Full virtual-desktop capture and injection, including monitors at negative
+  coordinates, with image-origin-aware scaling.
+- DPI-aware UIA bounds normalization and explicit `bounds_space` handling.
+- Safer concurrent input state: an in-flight injection counter replaces the
+  previous boolean, so overlapping actions cannot leave injection state stuck.
+- Chromium `PostMessage` support relaxed; CEF/UWP remain blocked.
+- Privacy gates extended to UIA discovery and invocation, with a single
+  `E_PRIVACY_BLOCKED` taxonomy.
+- Web recovery buttons no longer disabled by the web platform flag.
+- `deadlineMs` is now an absolute epoch deadline end-to-end; expired commands are
+  dropped instead of executed later.
+- Orphan daemon reclamation before binding, with parent-liveness and process
+  creation-time checks.
+- Plugin-list icon restored (512x512 `assets/icon.png`).
+- Four plain-language injection-mode labels in the settings panel.
+- First-run onboarding, offline wheelhouse, and path-sandbox guarantees retained.
 
-## Upgrade notes
+---
 
-1. Download `dsh-vhcu-win-x64-v1.0.1-full.zip` from Releases and extract it to
-   a permanent folder.
-2. Keep `dsh-better-sidebar` installed/enabled in the same DSH profile.
-3. Run the included installer once and fully restart DSH.
-4. Existing `macros.json` and model directories can be reused; no migration is
-   required.
-5. The full bundle already contains `models/`. If you use an engine-only build
-   or need to refresh the offline pack, download `models.zip` from Releases and
-   extract it over the existing `models/` directory.
+## Upgrade Notes
 
-## Known limitations
+1. Replace the plugin folder (or junction target) with the 1.1.0 build.
+2. Ensure `dsh-better-sidebar` is enabled in the same DSH profile.
+3. Restart DSH so the host plugin and sidebar bundle reload.
+4. Replace `dist/vhcu-daemon/` with the rebuilt 1.1.0 engine; do not mix
+   `_internal/` files from older builds.
+5. Settings are migrated automatically; new keys default to:
+   `allowHighPrecisionVision: true`, `enableMacroAutoGeneration: false`.
+6. External consumers of the contract should add
+   `E_MACRO_GENERATION_DISABLED` to their error table.
 
-- Windows only in this release; macOS/Linux drivers are not implemented.
-- Primary-monitor capture remains the supported capture target.
-- Hear is CPU-only (`base`, int8) and requires a WASAPI playback device.
-- The onedir release is approximately 238 MB because the complete Hear and
-  native runtime stack is included.
-- A `VHCU_LOG_DIR` contract exists, but no new rotating file-log writer is
-  introduced in this release.
+---
+
+## Release Artifact
+
+```
+dist/
+  vhcu-daemon/
+    vhcu-daemon.exe
+    _internal/...
+```
+
+The engine is a PyInstaller **onedir** build (no onefile extraction into
+`%TEMP%`). The Hear model is not bundled; use the offline model pack or allow the
+one-time download.
+
+---
+
+## Known Limitations
+
+- Windows 10/11 x64 only; no macOS/Linux engine in V1.1.
+- UWP/WinUI3 capture may lack a GDI back buffer; WGC fallback is deferred.
+- CEF/UWP windows reject PostMessage; use `physical` or `hybrid`.
+- Visual diff remains cell-sampled; precision mode improves PNG fidelity, not the
+  diff grid.
+- High-precision 4K frames are large; use them only when necessary.

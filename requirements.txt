@@ -1,9 +1,11 @@
-# dsh-vhcu — Python runtime dependencies (Windows)
+# dsh-vhcu V1.1 runtime dependencies (Windows x86_64, CPython 3.13)
 #
-# Screen capture (BitBlt / mss)
-mss>=10.0.0
-# Hear: array math, WASAPI loopback, WebRTC VAD, local faster-whisper
-numpy>=1.26
-soundcard>=0.4.3
-webrtcvad-wheels>=2.0.14
-faster-whisper>=1.2.0
+# Keep this file in sync with requirements.lock. The lock contains the full
+# runtime closure; the wheelhouse is built from the lock, not from this file.
+
+mss==10.2.0
+numpy==2.5.4
+soundcard==0.4.6
+webrtcvad-wheels==2.0.14.post1
+faster-whisper==1.2.1
+uiautomation==2.0.29

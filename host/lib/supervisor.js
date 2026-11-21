@@ -82,6 +82,8 @@ export class Supervisor extends EventEmitter {
     this.state = 'idle';
     this.child = null;
     this.pid = null;
+    /** Epoch-ms identity of the current child; guards against a replaced PID. */
+    this.childStartedAt = 0;
     this.readyInfo = null;
     this.exitInfo = null;
     this.lastError = null;
@@ -151,7 +153,15 @@ export class Supervisor extends EventEmitter {
       );
     }
     const cmdId = id ?? `c-${++this.cmdCounter}`;
-    const frame = C.cmdFrame({ seq: this.hostSeq++, id: cmdId, op, args, deadlineMs: timeoutMs });
+    // deadlineMs is an absolute epoch-ms deadline; the daemon refuses commands
+    // that sat in the pipe past it instead of executing a ghost action.
+    const frame = C.cmdFrame({
+      seq: this.hostSeq++,
+      id: cmdId,
+      op,
+      args,
+      deadlineMs: Date.now() + timeoutMs,
+    });
     const promise = new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(cmdId);
@@ -179,7 +189,12 @@ export class Supervisor extends EventEmitter {
   }
 
   /** Idempotent stop. Safe to call from a 'dispose' hook. */
-  async stop(reason = 'host-stop') {
+  async stop(reason = 'host-stop', { expectedStartedAt = 0 } = {}) {
+    if (expectedStartedAt && this.childStartedAt !== expectedStartedAt) {
+      // The child was replaced or already reaped after the caller took its
+      // identity snapshot. Never signal a different process by a reused PID.
+      return { stopped: false, reason: 'child-identity-mismatch' };
+    }
     if (this.stopPromise) return this.stopPromise;
     this.stopPromise = this._stop(reason);
     return this.stopPromise;
@@ -345,6 +360,7 @@ export class Supervisor extends EventEmitter {
 
     this.child = child;
     this.pid = child.pid;
+    this.childStartedAt = Date.now();
     this.lastHeartbeatAt = 0;
     this.lastHeartbeat = null;
     // Sequence numbers are per-process: a restarted daemon legitimately starts

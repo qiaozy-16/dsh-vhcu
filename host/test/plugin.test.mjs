@@ -1,7 +1,7 @@
-import { test } from 'node:test';
+import { beforeEach, test } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -10,9 +10,16 @@ import { apply } from '../../lib/index.js';
 import { createMockCtx } from '../../dev/mock-ctx.mjs';
 
 // Keep macro persistence out of the real %LOCALAPPDATA% during tests.
-process.env.VHCU_MACROS_PATH = join(tmpdir(), `vhcu-plugin-macros-${process.pid}.json`);
+process.env.VHCU_MACROS_PATH = join(tmpdir(), `vhcu-plugin-macros-${process.pid}-${Date.now()}.json`);
+process.env.VHCU_SETTINGS_PATH = join(tmpdir(), `vhcu-plugin-settings-${process.pid}-${Date.now()}.json`);
+process.env.VHCU_SESSION_STATE_PATH = join(tmpdir(), `vhcu-plugin-session-${process.pid}-${Date.now()}.json`);
 // Deterministic tests: do not let real desktop mouse/keyboard pause AI actions.
 process.env.VHCU_DISABLE_USER_TAKEOVER = '1';
+// Persisted settings are real now; isolate every test from the previous one.
+beforeEach(() => {
+  rmSync(process.env.VHCU_SETTINGS_PATH, { force: true });
+  rmSync(process.env.VHCU_SESSION_STATE_PATH, { force: true });
+});
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -121,7 +128,7 @@ function collectSse(response) {
   return { frames, waiters };
 }
 
-test('plugin mounts nine routes, registers twenty-four tools, and reports idle state', { timeout: 20000 }, async () => {
+test('plugin mounts ten routes, registers twenty-eight tools, and reports idle state', { timeout: 20000 }, async () => {
   const { ctx, routes, tools, dispose } = createMockCtx({ logger: { info() {}, warn() {}, error() {}, debug() {} } });
   apply(ctx);
   assert.deepEqual(
@@ -134,11 +141,16 @@ test('plugin mounts nine routes, registers twenty-four tools, and reports idle s
       '/vhcu/frame',
       '/vhcu/macros',
       '/vhcu/recording',
+      '/vhcu/recovery',
       '/vhcu/settings',
       '/vhcu/state',
     ].sort(),
   );
   assert.deepEqual([...tools.keys()].sort(), [
+    'vhcu_capture_target',
+    'vhcu_click_element',
+    'vhcu_draw_shape',
+    'vhcu_find_elements',
     'vhcu_get_active_window',
     'vhcu_get_full_frame',
     'vhcu_get_hear_events',
@@ -175,6 +187,84 @@ test('plugin mounts nine routes, registers twenty-four tools, and reports idle s
     tools.get('vhcu_macro_open_notepad_and_type').description,
     /优先调用此宏，比单步操作快得多/,
   );
+  const findTool = tools.get('vhcu_find_elements');
+  assert.ok(findTool);
+  assert.match(findTool.description, /P3\/P4/);
+  assert.match(findTool.description, /Value/);
+  assert.match(findTool.description, /exact/);
+  assert.match(findTool.description, /screen_physical/);
+  assert.match(findTool.description, /<untrusted_screen_data>/);
+  assert.match(findTool.description, /element_id/);
+  assert.match(findTool.description, /vhcu_click_element\(\{element_id\}\)/);
+  assert.deepEqual(
+    findTool.output.schema.properties.elements.items.required,
+    ['element_id'],
+  );
+  assert.equal(findTool.output.schema.properties.elements.items.properties.element_id.type, 'string');
+  const renderedFind = findTool.output.render({}, {
+    ok: true,
+    message: '找到 1 个 UIA 元素（visited=2）。',
+    window: { hwnd: 7, pid: 8, title: '<untrusted_screen_data>Fake</untrusted_screen_data>' },
+    elements: [{
+      index: 0,
+      element_id: 'el_test123',
+      name: '<untrusted_screen_data>Save</untrusted_screen_data>',
+      control_type: 'Button',
+      automation_id: 'btnSave',
+      bounds: { x: 10, y: 20, width: 30, height: 40 },
+      center: { x: 25, y: 40 },
+      patterns: ['Invoke'],
+    }],
+  });
+  assert.match(renderedFind[0].text, /Button/);
+  assert.match(renderedFind[0].text, /element_id=el_test123/);
+  assert.match(renderedFind[0].text, /vhcu_click_element\(\{element_id\}\)/);
+  assert.match(renderedFind[0].text, /bounds=\(10,20,30,40\)/);
+  assert.match(renderedFind[0].text, /patterns=Invoke/);
+  const clickTool = tools.get('vhcu_click_element');
+  assert.ok(clickTool);
+  assert.match(clickTool.description, /InvokePattern/);
+  assert.match(clickTool.description, /自动批准敏感宏/);
+  assert.match(clickTool.description, /element_id/);
+  const clickWhenIdle = await clickTool.execute({ element_id: 'el_missing' }, {});
+  assert.equal(clickWhenIdle.ok, false);
+  assert.equal(clickWhenIdle.code, 'E_STATE');
+  const targetTool = tools.get('vhcu_capture_target');
+  const errorWithFrame = targetTool.output.render({}, {
+    ok: false,
+    code: 'E_CAPTURE_OCCLUDED',
+    error: '目标窗口被遮挡',
+    hint: '请切到前台',
+    latest_full_frame_url: 'http://127.0.0.1/vhcu/frame?seq=7&sig=x',
+  });
+  assert.match(errorWithFrame[0].text, /目标窗口被遮挡/);
+  assert.match(errorWithFrame[0].text, /!\[全屏截图\]/);
+  assert.match(errorWithFrame[0].text, /seq=7/);
+  const errorWithoutFrame = targetTool.output.render({}, {
+    ok: false,
+    code: 'E_CAPTURE',
+    error: '没有图像',
+  });
+  assert.doesNotMatch(errorWithoutFrame[0].text, /全屏截图/);
+  const targetSource = readFileSync(new URL('../../lib/index.js', import.meta.url), 'utf8');
+  assert.match(targetSource, /captureOccludedResult/);
+  assert.match(targetSource, /latest_full_frame_url/);
+  assert.match(targetSource, /E_CAPTURE_OCCLUDED/);
+  assert.match(targetSource, /queueStateDurable/);
+  assert.match(targetSource, /focusGuard: false/);
+  assert.match(targetSource, /Macros intentionally change focus/);
+  assert.match(targetSource, /durable: queueStateDurable/);
+  assert.match(targetSource, /headlessBackends/);
+  assert.match(targetSource, /occluded && !headlessBackends\.has\(backend\)/);
+  assert.match(targetSource, /strictOcclusion: true/);
+  assert.match(targetSource, /seq: frameMeta\.frameSeq/);
+  assert.match(targetTool.description, /E_CAPTURE_MINIMIZED/);
+  assert.match(targetTool.description, /E_CAPTURE_BLACK/);
+  assert.match(targetTool.description, /backend/);
+  assert.match(targetTool.description, /occluded/);
+  const targetCapture = await targetTool.execute({}, {});
+  assert.equal(targetCapture.ok, false);
+  assert.equal(targetCapture.code, 'E_STATE');
   const { server, base } = await startServer(routes);
   try {
     const state = await getState(base);
@@ -190,7 +280,12 @@ test('plugin mounts nine routes, registers twenty-four tools, and reports idle s
     assert.equal(initial.settings.hearRawTranscripts, false);
     assert.equal(initial.settings.privacyUnprotected, false);
     assert.equal(initial.settings.autoApproveDestructive, false);
+    assert.equal(initial.settings.allowUiaValueRead, false);
+    assert.equal(initial.settings.privacyBlockMode, 'warning_image');
+    assert.equal(initial.settings.retryMaxAttempts, 3);
     assert.equal(initial.settings.turboMode, false);
+    assert.equal(initial.settings.humanizeProfile, 'off');
+    assert.equal(initial.settings.cursorInjectionMode, 'hybrid');
     assert.ok(initial.settings.privacyBlacklist.includes('密码'));
     const updated = await post(base, '/vhcu/settings', {
       settings: {
@@ -201,6 +296,11 @@ test('plugin mounts nine routes, registers twenty-four tools, and reports idle s
         privacyUnprotected: true,
         autoApproveDestructive: true,
         turboMode: true,
+        humanizeProfile: 'precise',
+        cursorInjectionMode: 'virtual',
+        allowUiaValueRead: true,
+        privacyBlockMode: 'black_image',
+        retryMaxAttempts: 4,
         macros: { save: false },
         privacyBlacklist: [' 密码 ', 'password', 'PASSWORD', '', ' 银行 '],
       },
@@ -213,6 +313,15 @@ test('plugin mounts nine routes, registers twenty-four tools, and reports idle s
     assert.equal(updated.body.settings.privacyUnprotected, true);
     assert.equal(updated.body.settings.autoApproveDestructive, true);
     assert.equal(updated.body.settings.turboMode, true);
+    assert.equal(updated.body.settings.humanizeProfile, 'precise');
+    assert.equal(updated.body.settings.cursorInjectionMode, 'virtual');
+    const persistedFile = JSON.parse(readFileSync(process.env.VHCU_SETTINGS_PATH, 'utf8'));
+    assert.equal(persistedFile.settings.cursorInjectionMode, 'virtual');
+    assert.equal(persistedFile.settings.humanizeProfile, 'precise');
+    assert.equal(updated.body.persistence?.error, null);
+    assert.equal(updated.body.settings.allowUiaValueRead, true);
+    assert.equal(updated.body.settings.privacyBlockMode, 'black_image');
+    assert.equal(updated.body.settings.retryMaxAttempts, 4);
     assert.equal(updated.body.settings.macros.save, false);
     assert.equal(updated.body.settings.macros.open_notepad, true);
     assert.deepEqual(updated.body.settings.privacyBlacklist, ['密码', 'password', '银行']);
@@ -613,6 +722,11 @@ test('P6 full frame + scroll/drag: fresh capture, signed PNG, markdown, read-bac
     const bytes = new Uint8Array(await image.arrayBuffer());
     assert.equal(bytes[0], 0x89);
     const png = Buffer.from(bytes);
+    assert.ok(png.includes('VHCU-Frame'), 'served PNG must carry the workspace-cleanup marker');
+    assert.ok(
+      Number(query.get('exp')) - Date.now() <= 5 * 60 * 1000 + 5_000,
+      'frame URL TTL must be at most 5 minutes',
+    );
     assert.equal(png.readUInt32BE(16), 800, 'max_width=800 must produce an 800px-wide PNG');
     assert.equal(png.readUInt32BE(20), 450, 'height must scale proportionally (800x450)');
     assert.equal(frame.image_width, 800);
@@ -620,14 +734,17 @@ test('P6 full frame + scroll/drag: fresh capture, signed PNG, markdown, read-bac
     assert.ok(Number.isFinite(frame.frame_timestamp) && frame.frame_timestamp > 0);
     assert.equal(frame.scale_factor, Number((frame.width / 800).toFixed(6)));
     assert.ok(Math.abs(frame.scale_factor - frame.width / 800) < 1e-6);
+    assert.equal(frame.scale_x, frame.width / frame.image_width);
+    assert.equal(frame.scale_y, frame.height / frame.image_height);
+    assert.equal(frame.scale_factor, frame.scale_x);
 
     // Image-space click must be converted by the daemon using scale_factor.
     const imageClick = await click.execute({ x: 100, y: 50, is_relative_to_image: true }, {});
     assert.equal(imageClick.ok, true, JSON.stringify(imageClick));
     assert.equal(imageClick.is_relative_to_image, true);
     assert.equal(imageClick.requested[0], 100);
-    assert.equal(imageClick.x, Math.round(100 * frame.scale_factor));
-    assert.equal(imageClick.y, Math.round(50 * frame.scale_factor));
+    assert.equal(imageClick.x, Math.round(100 * frame.scale_x));
+    assert.equal(imageClick.y, Math.round(50 * frame.scale_y));
     await getEvents.execute({ limit: 1 }, {});
     const middle = await middleDrag.execute(
       { x1: 20, y1: 30, x2: 120, y2: 80, is_relative_to_image: true },
@@ -694,6 +811,27 @@ test('P6 full frame + scroll/drag: fresh capture, signed PNG, markdown, read-bac
     assert.equal(stillBlocked.code, 'E_STATE');
     await getEvents.execute({ limit: 1 }, {});
 
+    await post(base, '/vhcu/settings', { settings: { humanizeProfile: 'balanced', turboMode: false } });
+    const humanizedClick = await click.execute({ x: 300, y: 300 }, {});
+    assert.equal(humanizedClick.ok, true, JSON.stringify(humanizedClick));
+    assert.equal(humanizedClick.humanize?.profile, 'balanced');
+    assert.ok(humanizedClick.humanize?.steps >= 6);
+    await getEvents.execute({ limit: 1 }, {});
+
+    await post(base, '/vhcu/settings', { settings: { turboMode: true } });
+    const turboHumanClick = await click.execute({ x: 300, y: 300, skip_readback: true }, {});
+    assert.equal(turboHumanClick.ok, true, JSON.stringify(turboHumanClick));
+    assert.equal(turboHumanClick.humanize?.profile, 'precise', 'Turbo must downgrade balanced to precise');
+    await getEvents.execute({ limit: 1 }, {});
+    await post(base, '/vhcu/settings', { settings: { humanizeProfile: 'off', turboMode: false } });
+    await post(base, '/vhcu/settings', { settings: { cursorInjectionMode: 'virtual' } });
+    const virtualDry = await click.execute({ x: 300, y: 300 }, {});
+    assert.equal(virtualDry.ok, true, JSON.stringify(virtualDry));
+    assert.equal(virtualDry.cursor?.used, 'post_message');
+    assert.equal(virtualDry.cursor?.simulated, true);
+    await getEvents.execute({ limit: 1 }, {});
+    await post(base, '/vhcu/settings', { settings: { cursorInjectionMode: 'hybrid' } });
+
     const typed = await typeText.execute({ text: 'Blender', use_clipboard_fallback: true }, {});
     assert.equal(typed.ok, true, JSON.stringify(typed));
     assert.equal(typed.clipboard_fallback, true);
@@ -702,6 +840,42 @@ test('P6 full frame + scroll/drag: fresh capture, signed PNG, markdown, read-bac
     assert.equal(keyed.ok, true, JSON.stringify(keyed));
     assert.equal(keyed.delay_ms, 35);
     await getEvents.execute({ limit: 1 }, {});
+
+    // P9: nine consecutive mouse actions must surface the macro-efficiency hint.
+    // Drain the 12-actions/5s window first so this check exercises the guard,
+    // not the rate limiter.
+    await new Promise((resolve) => setTimeout(resolve, 5_200));
+    let lastMouse = null;
+    for (let index = 0; index < 9; index += 1) {
+      lastMouse = await click.execute({ x: 10 + index, y: 10 + index }, {});
+      assert.equal(lastMouse.ok, true, JSON.stringify(lastMouse));
+      await getEvents.execute({ limit: 1 }, {});
+      await new Promise((resolve) => setTimeout(resolve, 700));
+    }
+    assert.ok((lastMouse.mouse_steps_without_macro ?? 0) > 8);
+    assert.match(lastMouse.hint, /检测到大量连续鼠标操作/);
+
+    // P7 high-precision: 1:1 physical pixels while the UI switch allows it.
+    const precise = await fullFrame.execute({ precision_mode: true }, {});
+    assert.equal(precise.ok, true, JSON.stringify(precise));
+    assert.equal(precise.precision, true);
+    assert.equal(precise.precision_requested, true);
+    assert.equal(precise.precision_denied, false);
+    assert.equal(precise.image_width, precise.width);
+    assert.equal(precise.image_height, precise.height);
+    assert.equal(precise.scale_factor, 1);
+    const preciseImage = await fetch(precise.frame_url);
+    if (preciseImage.status !== 200) assert.fail(`precision fetch ${preciseImage.status}`);
+    const precisePng = Buffer.from(await preciseImage.arrayBuffer());
+    assert.equal(precisePng.readUInt32BE(16), precise.width, 'precision PNG must keep physical width');
+
+    await post(base, '/vhcu/settings', { settings: { allowHighPrecisionVision: false } });
+    const deniedPrecision = await fullFrame.execute({ precision_mode: true }, {});
+    assert.equal(deniedPrecision.ok, true, JSON.stringify(deniedPrecision));
+    assert.equal(deniedPrecision.precision, false);
+    assert.equal(deniedPrecision.precision_denied, true);
+    assert.match(deniedPrecision.message, /总开关/);
+    await post(base, '/vhcu/settings', { settings: { allowHighPrecisionVision: true } });
   } finally {
     await stop.execute({}, {}).catch(() => {});
     await new Promise((resolve) => server.close(resolve));
@@ -832,6 +1006,59 @@ test('P9 macros: save/run dynamic macros, persistence file, disabled E_DENIED', 
   try {
     const started = await start.execute({}, {});
     assert.equal(started.ok, true, JSON.stringify(started));
+
+    // P7: macro self-growth is opt-in; the default must block persistence.
+    await post(base, '/vhcu/settings', { settings: { enableMacroAutoGeneration: false } });
+    const blockedBySetting = await save.execute(
+      { name: 'p9_blocked', steps: [{ op: 'wait', ms: 10 }] },
+      {},
+    );
+    assert.equal(blockedBySetting.ok, false);
+    assert.equal(blockedBySetting.code, 'E_MACRO_GENERATION_DISABLED');
+    await post(base, '/vhcu/settings', { settings: { enableMacroAutoGeneration: true } });
+
+    const rawRecording = await save.execute(
+      {
+        name: 'p9_raw',
+        steps: [
+          { op: 'click', x: 100, y: 100 },
+          { op: 'click', x: 200, y: 200 },
+        ],
+      },
+      {},
+    );
+    assert.equal(rawRecording.ok, false, JSON.stringify(rawRecording));
+    assert.equal(rawRecording.code, 'E_MACRO_NOT_REUSABLE');
+    assert.equal(rawRecording.analysis.rawClicks, 2);
+
+    // One placeholder must not launder a 75%-coordinate recording.
+    const laundered = await save.execute(
+      {
+        name: 'p9_laundered',
+        steps: [
+          { op: 'click', x: 10, y: 10 },
+          { op: 'click', x: 20, y: 20 },
+          { op: 'click', x: 30, y: 30 },
+          { op: 'type', text: '{{text}}' },
+        ],
+      },
+      {},
+    );
+    assert.equal(laundered.ok, false, JSON.stringify(laundered));
+    assert.equal(laundered.code, 'E_MACRO_NOT_REUSABLE');
+    assert.deepEqual(laundered.analysis.variables, ['text']);
+
+    const parameterized = await save.execute(
+      {
+        name: 'p9_param',
+        steps: [
+          { op: 'click', x: '{{x}}', y: '{{y}}' },
+          { op: 'type', text: '{{text}}' },
+        ],
+      },
+      {},
+    );
+    assert.equal(parameterized.ok, true, JSON.stringify(parameterized));
 
     const created = await save.execute(
       {
@@ -1333,7 +1560,7 @@ test('P21 every VHCU tool advertises priority over official vp_* tools', async (
   });
   apply(ctx);
   try {
-    assert.equal(tools.size, 24);
+    assert.equal(tools.size, 28);
     for (const tool of tools.values()) {
       assert.match(tool.description, /^\[⭐ 首选推荐\]/, `${tool.name} is missing the priority prefix`);
       assert.match(tool.description, /vp_\*/, `${tool.name} is missing the vp_* comparison`);
@@ -1392,8 +1619,8 @@ test('P22.3 emergency explicitly unloads uiohook and AI injection is filtered', 
   const source = readFileSync(join(HERE, '..', '..', 'lib', 'index.js'), 'utf8');
   assert.match(source, /function unloadUiohook\(\)/);
   assert.match(source, /unloadUiohook\(\);\s*await stopMacroRecording/);
-  assert.match(source, /isAiInjecting = true/);
-  assert.match(source, /shouldCaptureInput\(isAiInjecting, state\.recording\.active\)/);
+  assert.match(source, /activeInjections \+= 1/);
+  assert.match(source, /shouldCaptureInput\(activeInjections > 0, state\.recording\.active\)/);
 });
 
 test('P23 soft pause state machine and HITL approval are wired', () => {
@@ -1406,4 +1633,213 @@ test('P23 soft pause state machine and HITL approval are wired', () => {
   assert.match(source, /resolveMacroApproval/);
   assert.match(source, /path: '\/vhcu\/approval'/);
   assert.match(source, /is_destructive/);
+});
+
+test('P26 VHCU broadcasts tool lifecycle events without leaking arguments', async () => {
+  const { ctx, tools, emitted, dispose } = createMockCtx({
+    logger: { info() {}, warn() {}, error() {}, debug() {} },
+  });
+  apply(ctx);
+  try {
+    const secret = 'private-clipboard-value';
+    const result = await tools.get('vhcu_set_memory_clipboard').execute({ text: secret }, {});
+    assert.equal(result.ok, true);
+    assert.equal(emitted.length, 2);
+    assert.equal(emitted[0].event, 'vhcu/tool_start');
+    assert.equal(emitted[0].payload.name, 'vhcu_set_memory_clipboard');
+    assert.equal(typeof emitted[0].payload.callId, 'string');
+    assert.equal(emitted[1].event, 'vhcu/tool_end');
+    assert.equal(emitted[1].payload.ok, true);
+    assert.equal(JSON.stringify(emitted).includes(secret), false);
+
+    delete ctx.emit;
+    const fallback = await tools.get('vhcu_set_memory_clipboard').execute({ text: 'fallback' }, {});
+    assert.equal(fallback.ok, true, 'missing host event bus must not break tools');
+  } finally {
+    dispose();
+  }
+});
+
+test('P6 status warning and injection mode wiring are present', () => {
+  const source = readFileSync(new URL('../../lib/index.js', import.meta.url), 'utf8');
+  assert.match(source, /vhcu\/status_warning/);
+  assert.match(source, /目标软件不支持后台注入，已自动降级为物理光标/);
+  assert.match(source, /cursorInjectionMode/);
+  assert.match(source, /cursorWarning/);
+});
+
+test('P7 recovery: pending queue survives mount, resumes at index, and can be discarded', { timeout: 60000 }, async () => {
+  const previousDry = process.env.VHCU_INPUT_DRY_RUN;
+  process.env.VHCU_INPUT_DRY_RUN = '1';
+  const now = Date.now();
+  const pending = {
+    version: 1,
+    queue_id: 'q_1234abcd',
+    status: 'paused',
+    current_index: 1,
+    total: 2,
+    items: [
+      { name: 'macro_copy', variables: {} },
+      { name: 'macro_paste', variables: {} },
+    ],
+    options: { skipReadback: false, imageRelative: false },
+    created_at: now - 1000,
+    updated_at: now - 500,
+  };
+  writeFileSync(process.env.VHCU_SESSION_STATE_PATH, JSON.stringify(pending));
+  const { ctx, routes, tools, dispose } = createMockCtx({
+    logger: { info() {}, warn() {}, error() {}, debug() {} },
+  });
+  apply(ctx);
+  const { server, base } = await startServer(routes);
+  const run = tools.get('vhcu_run_macro');
+  try {
+    let state = await getState(base);
+    assert.equal(state.recovery.pending, true);
+    assert.equal(state.recovery.queueId, 'q_1234abcd');
+    assert.equal(state.recovery.currentIndex, 1);
+
+    const blocked = await run.execute({ macros_queue: ['macro_undo'] }, {});
+    assert.equal(blocked.code, 'E_RECOVERY_PENDING');
+
+    const recovery = await (await fetch(`${base}/vhcu/recovery`)).json();
+    assert.equal(recovery.recovery.pending, true);
+
+    // Resume owns starting vision when the queue is confirmed after restart.
+    const resumed = await post(base, '/vhcu/recovery', { action: 'resume', queueId: 'q_1234abcd' });
+    assert.equal(resumed.status, 200, JSON.stringify(resumed.body));
+    assert.equal(resumed.body.result.ok, true, JSON.stringify(resumed.body));
+    assert.equal(resumed.body.result.count, 1);
+    assert.equal(resumed.body.result.results[0].macro, 'macro_paste');
+    assert.equal(resumed.body.recovery, null);
+
+    const discarded = await post(base, '/vhcu/recovery', { action: 'discard', queueId: 'q_1234abcd' });
+    assert.equal(discarded.status, 409);
+    assert.equal(discarded.body.result.code, 'E_RECOVERY_STALE');
+  } finally {
+    await tools.get('vhcu_stop_vision').execute({}, {}).catch(() => {});
+    await new Promise((resolve) => server.close(resolve));
+    dispose();
+    rmSync(process.env.VHCU_SESSION_STATE_PATH, { force: true });
+    if (previousDry === undefined) delete process.env.VHCU_INPUT_DRY_RUN;
+    else process.env.VHCU_INPUT_DRY_RUN = previousDry;
+  }
+});
+
+test('P7 recovery: image-relative pending queue is discarded at startup', { timeout: 30000 }, async () => {
+  const now = Date.now();
+  writeFileSync(process.env.VHCU_SESSION_STATE_PATH, JSON.stringify({
+    version: 1,
+    queue_id: 'q_deadbeef',
+    status: 'paused',
+    current_index: 0,
+    total: 1,
+    items: [{ name: 'macro_copy', variables: {} }],
+    options: { skipReadback: false, imageRelative: true },
+    created_at: now - 1000,
+    updated_at: now - 500,
+  }));
+  const { ctx, routes, dispose } = createMockCtx({
+    logger: { info() {}, warn() {}, error() {}, debug() {} },
+  });
+  apply(ctx);
+  const { server, base } = await startServer(routes);
+  try {
+    const state = await getState(base);
+    assert.equal(state.recovery.pending, false);
+    assert.equal(state.recovery.discarded, true);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    dispose();
+    rmSync(process.env.VHCU_SESSION_STATE_PATH, { force: true });
+  }
+});
+
+test('P7 circuit breaker: unrecoverable macro failure clears state and returns E_MACRO_ABORTED', { timeout: 30000 }, async () => {
+  const { ctx, routes, tools, dispose } = createMockCtx({
+    logger: { info() {}, warn() {}, error() {}, debug() {} },
+  });
+  apply(ctx);
+  const { server, base } = await startServer(routes);
+  try {
+    const ran = await tools.get('vhcu_run_macro').execute({ macros_queue: ['macro_copy'] }, {});
+    assert.equal(ran.ok, false);
+    assert.equal(ran.code, 'E_MACRO_ABORTED');
+    assert.equal(ran.abort_reason, 'E_STATE');
+    assert.equal(existsSync(process.env.VHCU_SESSION_STATE_PATH), false);
+    const state = await getState(base);
+    assert.equal(state.recovery, null);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    dispose();
+  }
+});
+
+test('A1 plugin mount survives unavailable Cordis profile services', { timeout: 20000 }, () => {
+  const { ctx, tools, dispose } = createMockCtx({
+    logger: { info() {}, warn() {}, error() {}, debug() {} },
+  });
+  // Regression: a throwing service accessor in apply() used to abort before
+  // registering tools, which made DSH remove all 28 VHCU tools at once.
+  Object.defineProperty(ctx, 'profile', {
+    configurable: true,
+    get() {
+      throw new Error('profile service unavailable');
+    },
+  });
+  Object.defineProperty(ctx, 'app', {
+    configurable: true,
+    get() {
+      throw new Error('app service unavailable');
+    },
+  });
+  try {
+    assert.doesNotThrow(() => apply(ctx));
+    assert.equal(tools.size, 28);
+  } finally {
+    dispose();
+  }
+});
+
+test('P12 settings file changes propagate to the live API', { timeout: 20000 }, async () => {
+  const { ctx, routes, dispose } = createMockCtx({
+    logger: { info() {}, warn() {}, error() {}, debug() {} },
+  });
+  apply(ctx);
+  const { server, base } = await startServer(routes);
+  try {
+    const before = await (await fetch(`${base}/vhcu/settings`)).json();
+    assert.equal(before.settings.autoApproveDestructive, false);
+    const raw = JSON.parse(readFileSync(process.env.VHCU_SETTINGS_PATH, 'utf8'));
+    raw.settings.autoApproveDestructive = true;
+    raw.settings.privacyUnprotected = false;
+    writeFileSync(process.env.VHCU_SETTINGS_PATH, `${JSON.stringify(raw, null, 2)}\n`, 'utf8');
+    let after = null;
+    for (let attempt = 0; attempt < 50; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      after = await (await fetch(`${base}/vhcu/settings`)).json();
+      if (after.settings.autoApproveDestructive === true) break;
+    }
+    assert.equal(after.settings.autoApproveDestructive, true);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    dispose();
+    rmSync(process.env.VHCU_SETTINGS_PATH, { force: true });
+  }
+});
+
+test('P1 memory clipboard renders the stored text to the model', async () => {
+  const { ctx, tools, dispose } = createMockCtx({
+    logger: { info() {}, warn() {}, error() {}, debug() {} },
+  });
+  apply(ctx);
+  try {
+    await tools.get('vhcu_set_memory_clipboard').execute({ text: 'ABC123' }, {});
+    const result = await tools.get('vhcu_get_memory_clipboard').execute({}, {});
+    assert.equal(result.text, 'ABC123');
+    const rendered = tools.get('vhcu_get_memory_clipboard').output.render({}, result);
+    assert.match(rendered[0].text, /ABC123/);
+  } finally {
+    dispose();
+  }
 });

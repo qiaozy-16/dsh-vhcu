@@ -42,11 +42,15 @@ export const OPS = Object.freeze([
   'vision.configure',
   'vision.snapshot',
   'vision.capture',
+  'uia.find',
+  'uia.click',
+  'uia.click_point',
   'input.click',
   'input.type',
   'input.hotkey',
   'input.scroll',
   'input.drag',
+  'input.draw_shape',
   'input.middle_drag',
   'input.macro.open_notepad',
   'input.macro.save',
@@ -59,7 +63,7 @@ export const OPS = Object.freeze([
 ]);
 
 /** Vision sources the daemon may advertise. */
-export const SOURCES = Object.freeze(['fake', 'mss']);
+export const SOURCES = Object.freeze(['fake', 'mss', 'window']);
 
 /**
  * Error taxonomy. `retryable` drives supervisor policy; `hint` is what the UI
@@ -73,6 +77,66 @@ export const ERROR_CODES = Object.freeze({
   E_UNAVAILABLE: { retryable: true, hint: '依赖/数据源不可用：检查 Python venv 与 mss 安装。' },
   E_STATE: { retryable: false, hint: '当前状态不允许该操作：先 stop 再 start。' },
   E_CAPTURE: { retryable: true, hint: '抓屏失败：可能是独占全屏、锁屏或 DRM 内容。' },
+  E_CAPTURE_MINIMIZED: {
+    retryable: false,
+    hint: '目标窗口已最小化，没有可捕获的渲染帧；请先恢复窗口再截图。',
+  },
+  E_CAPTURE_BLACK: {
+    retryable: false,
+    hint: '目标窗口所有 GDI 后端都返回黑图/单色图；可能是 UWP/WinUI3 或 DirectComposition 窗口。',
+  },
+  E_CAPTURE_OCCLUDED: {
+    retryable: true,
+    hint: '目标窗口被其他窗口遮挡，当前只能得到屏幕区域；请置前目标窗口后重试。',
+  },
+  E_CAPTURE_TARGET_GONE: {
+    retryable: false,
+    hint: '目标窗口已关闭、销毁或没有可用矩形；请重新获取前台窗口。',
+  },
+  E_CAPTURE_TARGET_NOT_FOUND: {
+    retryable: false,
+    hint: '找不到目标窗口 HWND；请确认窗口仍存在并重新获取。',
+  },
+  E_CAPTURE_UNSUPPORTED: {
+    retryable: false,
+    hint: '目标窗口尺寸/类型超出当前 GDI 捕获能力。',
+  },
+  E_UIA_UNAVAILABLE: {
+    retryable: true,
+    hint: 'UIA 不可用：检查 uiautomation/comtypes 是否安装，或重启 daemon。',
+  },
+  E_UIA_TIMEOUT: {
+    retryable: true,
+    hint: 'UIA 查询超时：目标窗口可能繁忙；稍后重试或重启 daemon。',
+  },
+  E_UIA_FAILED: {
+    retryable: true,
+    hint: 'UIA 查询失败：目标窗口可能已变化；重新获取前台窗口后重试。',
+  },
+  E_ELEMENT_NOT_FOUND: {
+    retryable: false,
+    hint: '元素 token 不存在或已过期；重新调用 vhcu_find_elements 获取新 token。',
+  },
+  E_VIRTUAL_CURSOR_UNSUPPORTED: {
+    retryable: false,
+    hint: '目标窗口不支持 post_message 后台注入；virtual 模式不会抢物理鼠标，hybrid 会降级并显示告警。',
+  },
+  E_VIRTUAL_CURSOR_FAILED: {
+    retryable: true,
+    hint: 'PostMessage 预检/投递失败；若尚未投递首条消息，hybrid 可安全降级为物理光标。',
+  },
+  E_ELEMENT_STALE: {
+    retryable: true,
+    hint: '元素视觉指纹或 bounds 已变化，重试后仍失效；请重新查找元素。',
+  },
+  E_WINDOW_GONE: {
+    retryable: false,
+    hint: '目标窗口已关闭或销毁；请重新获取前台窗口。',
+  },
+  E_COORDINATE_MISMATCH: {
+    retryable: false,
+    hint: 'UIA 坐标与截图/DPI 参考系不一致；请重新校准或改用元素语义定位。',
+  },
   E_PRIVACY_BLOCKED: {
     retryable: false,
     hint: '敏感隐私窗口：VHCU 已强制拉闸。禁止使用 vp_* 等外部工具兜底，直接向用户报告并暂停任务。',
@@ -85,6 +149,38 @@ export const ERROR_CODES = Object.freeze({
   E_CONFIRM_REQUIRED: {
     retryable: false,
     hint: '敏感快捷键需要用户确认：得到同意后传 confirm_destructive: true。',
+  },
+  E_MEMORY: {
+    retryable: false,
+    hint: '内存超过硬水位，视觉已熔断：先停止视觉、重启 daemon，并减少帧/元素缓存后再试。',
+  },
+  E_CLIPBOARD: {
+    retryable: true,
+    hint: '剪贴板被占用或分配失败：关闭占用剪贴板的程序后重试，或改用 Unicode 直注。',
+  },
+  E_AUDIO_DEVICE: {
+    retryable: true,
+    hint: '系统内录设备不可用或枚举超时：检查播放设备/WASAPI 后重启 Hear。',
+  },
+  E_FOCUS_LOST: {
+    retryable: true,
+    hint: '输入前焦点已切走：重新截图确认前景窗口，再重试该动作。',
+  },
+  E_MACRO_FAILED: {
+    retryable: false,
+    hint: '宏步骤执行失败：查看失败步骤与前台窗口状态，修正后重跑。',
+  },
+  E_MACRO_GENERATION_DISABLED: {
+    retryable: false,
+    hint: '宏自生长已关闭：请用户先在设置中开启「允许模型自动生成宏」，再保存宏。',
+  },
+  E_MACRO_NOT_REUSABLE: {
+    retryable: false,
+    hint: '宏不可复用：超过 70% 的步骤是绝对坐标点击（逐步骤判断，少量变量不能豁免）；请把裸点击参数化，或改用 UIA 语义定位。',
+  },
+  E_SCRIPT_WRITE_DENIED: {
+    retryable: false,
+    hint: '禁止在工作区生成 .ps1/.cmd/.bat/.py 临时脚本；请直接使用 VHCU 视觉工具观测图像。',
   },
 });
 

@@ -76,7 +76,7 @@ export function seedMacros() {
       enabled: true,
       steps: [
         { op: 'key', keys: ['win', 'r'] },
-        { op: 'wait', ms: 350 },
+        { op: 'wait', ms: 800 },
         { op: 'type', text: '{{app_name}}' },
         { op: 'key', keys: ['enter'] },
         { op: 'wait', ms: 1000 },
@@ -112,7 +112,7 @@ export function seedMacros() {
       enabled: true,
       steps: [
         { op: 'key', keys: ['win', 'r'] },
-        { op: 'wait', ms: 350 },
+        { op: 'wait', ms: 800 },
         { op: 'type', text: 'https://www.bing.com' },
         { op: 'key', keys: ['enter'] },
         { op: 'wait', ms: 1200 },
@@ -273,6 +273,47 @@ export function macroVariables(steps) {
     }
   }
   return names;
+}
+
+const CLICK_OPS = new Set(['click', 'double_click', 'right_click']);
+const PLACEHOLDER = /\{\{[a-zA-Z0-9_]+\}\}/;
+
+function isPlaceholder(value) {
+  return typeof value === 'string' && PLACEHOLDER.test(value);
+}
+
+/**
+ * Measure how much of a macro is a one-off coordinate recording.
+ * A step counts as "raw" only when it is a click with literal x/y numbers;
+ * parameterized coordinates do not count.
+ */
+export function analyzeMacroReusability(steps) {
+  const list = Array.isArray(steps) ? steps : [];
+  let rawClicks = 0;
+  for (const step of list) {
+    if (!step || typeof step !== 'object' || !CLICK_OPS.has(step.op)) continue;
+    if (isPlaceholder(step.x) || isPlaceholder(step.y)) continue;
+    const x = Number(step.x);
+    const y = Number(step.y);
+    if (Number.isFinite(x) && Number.isFinite(y)) rawClicks += 1;
+  }
+  const variables = macroVariables(list);
+  return {
+    steps: list.length,
+    rawClicks,
+    ratio: list.length ? rawClicks / list.length : 0,
+    variables,
+  };
+}
+
+/**
+ * P8: reject macros whose steps are mostly raw coordinate clicks.
+ * This is a per-step rule: a few {{variable}} placeholders elsewhere must not
+ * launder a 90%-coordinate recording, so variables do not exempt the macro.
+ */
+export function isMacroNotReusable(steps) {
+  const analysis = analyzeMacroReusability(steps);
+  return analysis.rawClicks > 0 && analysis.ratio > 0.7;
 }
 
 function fail(code, message, hint) {
@@ -507,14 +548,38 @@ export class MacroStore {
       // same-named legacy macro into the built-in category (read-only).
       for (const seed of seedMacros()) {
         const existing = this.find(seed.name);
+        const normalizedSeed = normalizeMacro(seed, { requireEnabled: true });
         if (!existing) {
-          this.macros.push(normalizeMacro(seed, { requireEnabled: true }));
+          this.macros.push(normalizedSeed);
           migrated = true;
           continue;
         }
-        if (!existing.builtin || existing.category !== BUILTIN_CATEGORY) {
+        // Built-ins are code-owned: upgrade old persisted definitions so a
+        // fixed wait/key sequence reaches users who already have macros.json.
+        // The user's enabled/disabled choice is preserved.
+        const before = JSON.stringify({
+          builtin: existing.builtin,
+          category: existing.category,
+          description: existing.description,
+          target_app: existing.target_app,
+          is_destructive: existing.is_destructive,
+          steps: existing.steps,
+        });
+        const after = JSON.stringify({
+          builtin: true,
+          category: BUILTIN_CATEGORY,
+          description: normalizedSeed.description,
+          target_app: normalizedSeed.target_app,
+          is_destructive: normalizedSeed.is_destructive,
+          steps: normalizedSeed.steps,
+        });
+        if (before !== after) {
           existing.builtin = true;
           existing.category = BUILTIN_CATEGORY;
+          existing.description = normalizedSeed.description;
+          existing.target_app = normalizedSeed.target_app;
+          existing.is_destructive = normalizedSeed.is_destructive;
+          existing.steps = normalizedSeed.steps;
           migrated = true;
         }
       }

@@ -32,7 +32,8 @@ class InputBackend(Protocol):
 
 class CaptureBackend(Protocol):
     def available_sources(self) -> list[str]: ...
-    def create_source(self, name: str, **options: Any) -> Any: ...
+    def create_source(self, name: str, *, target_hwnd: int | None = None,
+                      **options: Any) -> Any: ...
 
 
 class AudioBackend(Protocol):

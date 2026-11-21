@@ -1,7 +1,8 @@
 {
   "name": "dsh-vhcu",
-  "description": "VHCU vision + computer-use for DSH: privacy blackout, focus/frame guards, resilient Hear, 100-step macros, twenty-four tools.",
-  "version": "1.0.1",
+  "description": "VHCU vision + computer-use for DSH: privacy blackout, focus/frame guards, resilient Hear, 100-step macros, twenty-eight tools.",
+  "version": "1.1.0",
+  "icon": "assets/icon.png",
   "compatibility": {
     "node": ">=20",
     "dshReleases": {

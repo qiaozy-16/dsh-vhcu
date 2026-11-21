@@ -124,3 +124,51 @@ test('image plane rejects a wrong token', { skip, timeout: 20000 }, async () => 
     await supervisor.stop('cleanup').catch(() => {});
   }
 });
+
+test('real Python daemon: seq-bound frame URLs never fall back to latest', { skip, timeout: 30000 }, async () => {
+  const supervisor = new Supervisor({
+    python,
+    visionPath: VISION,
+    daemonArgs: ['-u', '-m', 'vhcu_daemon'],
+    cwd: ROOT,
+    readyTimeoutMs: 15000,
+  });
+  try {
+    const ready = await supervisor.start();
+    await supervisor.send('vision.start', { source: 'fake', fps: 2 }, { timeoutMs: 5000 });
+    const first = await supervisor.send('vision.capture', {}, { timeoutMs: 5000 });
+    const second = await supervisor.send('vision.capture', {}, { timeoutMs: 5000 });
+    assert.ok(first.frame_seq > 0, 'capture must report frame_seq');
+    assert.ok(second.frame_seq > first.frame_seq, 'each capture gets a fresh seq');
+
+    // The first frame must still resolve after a later capture.
+    const bound = await fetchFrame({
+      port: ready.port,
+      token: ready.token,
+      x: 0,
+      y: 0,
+      w: first.width,
+      h: first.height,
+      maxWidth: 64,
+      seq: first.frame_seq,
+    });
+    assert.equal(isPng(bound.buffer), true, 'seq-bound URL must serve its PNG');
+
+    // An evicted/unknown seq fails closed instead of serving whatever is latest.
+    await assert.rejects(
+      fetchFrame({
+        port: ready.port,
+        token: ready.token,
+        x: 0,
+        y: 0,
+        w: 64,
+        h: 64,
+        maxWidth: 64,
+        seq: 999_999,
+      }),
+      (error) => error.status === 404,
+    );
+  } finally {
+    await supervisor.stop('cleanup').catch(() => {});
+  }
+});

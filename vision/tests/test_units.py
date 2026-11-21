@@ -166,6 +166,24 @@ class HttpFrameServerTest(unittest.TestCase):
         self.assertEqual(body[:8], b"\x89PNG\r\n\x1a\n")
         self.assertEqual(headers.get("x-frame-size"), "16x12")
 
+    def test_frame_reports_virtual_origin(self):
+        from dataclasses import replace
+        self.frame = replace(self.frame, origin_x=-1920, origin_y=0)
+        status, headers, _ = self._get(f"/frame?token={'t' * 24}&maxw=16")
+        self.assertEqual(status, 200)
+        self.assertEqual(headers.get("x-frame-origin"), "-1920,0")
+
+    def test_frame_seq_binds_exact_target_snapshot(self):
+        from dataclasses import replace
+        target = replace(self.frame, frame_seq=7, width=8, height=6, data=b"" * (8 * 6 * 4))
+        self.server._frame_by_seq = lambda seq: target if seq == 7 else None
+        status, headers, _ = self._get(f"/frame?token={'t' * 24}&seq=7&maxw=8")
+        self.assertEqual(status, 200)
+        self.assertEqual(headers.get("x-frame-seq"), "7")
+        self.assertEqual(headers.get("x-frame-size"), "8x6")
+        status, _, _ = self._get(f"/frame?token={'t' * 24}&seq=8")
+        self.assertEqual(status, 404)
+
     def test_bad_crop_is_rejected(self):
         status, _, _ = self._get(f"/frame?token={'t' * 24}&w=abc")
         self.assertEqual(status, 400)

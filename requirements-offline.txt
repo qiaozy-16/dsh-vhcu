@@ -1,0 +1,5 @@
+# Offline install recipe (Windows x86_64 / CPython 3.13).
+# Build the wheelhouse first with scripts/build-wheelhouse.ps1.
+--no-index
+--find-links .\wheels
+-r requirements.lock
