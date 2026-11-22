@@ -14,6 +14,7 @@ export function createMockCtx({ logger = console, label = 'vhcu-mock' } = {}) {
   const routes = new Map();
   const tools = new Map();
   const disposeHandlers = [];
+  const toolMiddleware = [];
   const disposers = [];
   const emitted = [];
   let origin = '';
@@ -66,10 +67,27 @@ export function createMockCtx({ logger = console, label = 'vhcu-mock' } = {}) {
     },
     on(event, handler) {
       if (event === 'dispose') disposeHandlers.push(handler);
+      else if (event === 'tools/execute') toolMiddleware.push(handler);
     },
     emit(event, payload) {
       emitted.push({ event, payload });
     },
+  };
+
+  /**
+   * Run the registered `tools/execute` middleware chain against a fake call.
+   * Mirrors the host waterfall: a listener may return a result to short-circuit,
+   * or call next() to continue; the chain settles on an allow result.
+   * @param {object} exec - fake execution: name + arguments (plus optional fields).
+   */
+  const runTool = async (exec) => {
+    const chain = toolMiddleware.slice();
+    const allow = { isError: false, content: [{ type: 'text', text: 'tool-allowed' }], value: {} };
+    const dispatch = (index) => {
+      if (index >= chain.length) return allow;
+      return chain[index](exec, () => dispatch(index + 1));
+    };
+    return dispatch(0);
   };
 
   const dispose = () => {
@@ -80,6 +98,7 @@ export function createMockCtx({ logger = console, label = 'vhcu-mock' } = {}) {
         // mock teardown must not mask the real assertion
       }
     }
+    toolMiddleware.length = 0;
     for (const { disposer } of disposers.splice(0)) {
       try {
         disposer();
@@ -91,5 +110,5 @@ export function createMockCtx({ logger = console, label = 'vhcu-mock' } = {}) {
     tools.clear();
   };
 
-  return { ctx, routes, tools, emitted, dispose };
+  return { ctx, routes, tools, emitted, dispose, runTool };
 }
