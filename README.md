@@ -1,15 +1,15 @@
 <p align="center"><img src="assets/icon.png" width="128" height="128" alt="VHCU Logo"></p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.1.0-4d6bfe" alt="Version 1.1.0">
+  <img src="https://img.shields.io/badge/version-1.1.1-4d6bfe" alt="Version 1.1.1">
   <img src="https://img.shields.io/badge/platform-Windows%2010%2F11%20x64-0078D6" alt="Platform Windows 10/11 x64">
   <img src="https://img.shields.io/badge/node-%3E%3D20-339933" alt="Node >= 20">
-  <img src="https://img.shields.io/badge/python-3.13-3776AB" alt="Python 3.13">
+  <img src="https://img.shields.io/badge/engine-onedir-4d6bfe" alt="PyInstaller onedir engine">
 </p>
 
 # DSH-VHCU
 
-A zero-dependency, sandboxed multimodal Computer-Use Agent (CUA) for DeepSeek Harness.
+A guarded, local-first multimodal Computer-Use Agent (CUA) for DeepSeek Harness.
 
 DSH-VHCU gives DeepSeek Harness a guarded, local-first way to inspect the desktop,
 understand the active window, transcribe system playback, and drive Windows input.
@@ -17,6 +17,25 @@ It exposes 28 model-callable tools and a sidebar panel; pixels, audio, macros,
 coordinates, and settings stay on the machine.
 
 **Scope:** Windows 10/11 x64, DSH Desktop App only.
+
+## DSH Compatibility
+
+| DSH Desktop release | Status | Notes |
+|---|---|---|
+| **0.2.2-rc.5** | **Tested / supported** | Real-host validation on 2026-11-22: 28 tools, vision, UIA, capture, macro recording, Edge/Douyin, Visual Studio C build |
+| 0.2.1-rc.3 | Supported | Baseline for 1.1.0; Node 206/206, Python 258/258 |
+| 0.2.1-rc.2 | Declared compatible | Listed in `dsh.plugin.json`; not re-tested in 1.1.1 |
+| 0.2.0-rc.2 | Declared compatible | Listed in `dsh.plugin.json`; legacy |
+| Other / older | Not supported | Host API drift is not covered |
+
+DSH `0.2.2` splits the tool executor into `dsh-tool-executor-native`
+(enabled by default) and `dsh-tool-executor-ptc` (disabled by default).
+VHCU needs the native executor; do not disable it. The old `tools.mode`
+configuration is gone in 0.2.2.
+
+> Upgrading DSH can reset a custom profile's bundle list. After a DSH upgrade,
+> re-enable `dsh-vhcu` (and `dsh-better-sidebar`) in the Plugins page or restore
+> the profile's `dsh.profile.bundles`, then restart DSH.
 
 ## Core Capabilities
 
@@ -93,7 +112,20 @@ flowchart LR
 
 ### For Users (Release Bundle)
 
-1. Download `dsh-vhcu.zip` from Releases.
+**Requirements**
+
+- Windows 10/11 x64.
+- DSH Desktop 0.2.1-rc.3 or 0.2.2-rc.5 (0.2.2-rc.5 tested).
+- Node.js 20+ on `PATH` (the installer is a Node script).
+- `dsh-better-sidebar` installed and enabled in the same DSH profile.
+- No separate Python installation is required: the release zip ships the
+  PyInstaller **onedir** engine in `dist/vhcu-daemon/`.
+- The Hear model is **not** bundled; download it on first use or set
+  `VHCU_MODEL_PATH`.
+
+**Steps**
+
+1. Download `dsh-vhcu-v1.1.1.zip` from Releases.
 2. Extract it to a stable folder, for example `C:\Users\<you>\dsh-vhcu`.
 3. Install and enable `dsh-better-sidebar` in the same DSH profile.
 4. From the extracted folder, register the plugin:
@@ -108,6 +140,12 @@ flowchart LR
 5. Restart DSH and open the VHCU sidebar panel.
 6. For Hear, start it once to download the local model, or point
    `VHCU_MODEL_PATH` at an offline faster-whisper model.
+
+> The zip is a **DSH plugin bundle**, not a standalone application. There is no
+> VHCU window or CLI that works without a running DSH Desktop host. Running
+> `node scripts/install.mjs` only registers the plugin in a DSH profile; it does
+> not start VHCU by itself. `node_modules/uiohook-napi` is included in the zip
+> so macro recording works without a separate `npm install`.
 
 ### For Developers (Source Build)
 
@@ -161,6 +199,12 @@ $env:VHCU_PYTHON = (Resolve-Path .\.venv\Scripts\python.exe).Path
 - **Multi-monitor and complex DPI layouts are not fully validated in V1.1.**
 - **The bundled Hear model (`base`) has limited accuracy under strong background
   noise.** Transcription still works, but word-level quality can degrade.
+- **The four-corner emergency stop applies to the physical pointer.** `virtual`
+  injection does not move the physical cursor, so a corner target will not trip
+  that guard; use `physical`/`hybrid` when the stop gesture matters.
+- **Macro recording requires a real desktop host.** It is unavailable in
+  headless / `ELECTRON_RUN_AS_NODE` launches because the global `uiohook` hook
+  receives no events there.
 - Windows 10/11 x64 only; no macOS or Linux engine in V1.1.
 
 ## License

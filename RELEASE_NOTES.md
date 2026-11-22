@@ -1,3 +1,88 @@
+# v1.1.1 - DSH 0.2.2-rc.5 Compatibility
+
+**Release date:** 2026-11-22  
+**Platform:** Windows 10/11 x64, DSH Desktop App  
+**Engine:** `dist/vhcu-daemon/vhcu-daemon.exe` (PyInstaller onedir)  
+**Plugin version:** 1.1.1  
+**Tested DSH:** 0.2.2-rc.5
+
+V1.1.1 makes VHCU fully compatible with DSH Desktop **0.2.2-rc.5** and fixes a
+tool-input guard that had been inert since an earlier host API change.
+
+## Compatibility
+
+| DSH Desktop | Status |
+|---|---|
+| 0.2.2-rc.5 | **Tested / supported** |
+| 0.2.1-rc.3 | Supported |
+| 0.2.1-rc.2 | Declared compatible, not re-tested |
+| 0.2.0-rc.2 | Declared compatible, legacy |
+| Other / older | Not supported |
+
+DSH 0.2.2 splits tools into `dsh-tool-executor-native` (enabled by default) and
+`dsh-tool-executor-ptc` (disabled by default). VHCU requires the native
+executor. The legacy `tools.mode` configuration no longer exists.
+
+**Upgrade note:** upgrading DSH can reset a custom profile's bundle list. If all
+plugins appear disabled after the upgrade, re-enable `dsh-vhcu` and
+`dsh-better-sidebar` in the Plugins page (or restore
+`dsh.profile.bundles`), then restart DSH.
+
+## Fixes
+
+- **Tool-input guard.** The `exec.args` read has been replaced with the real
+  host field, `exec.arguments`. The guard that blocks VHCU from running its own
+  screenshot helper as a model shell command now actually sees the requested
+  script. Regression tests were added for allow/deny paths and the legacy
+  `args` fallback.
+- **Stale client test.** The README assertion was updated to the current
+  "DSH Desktop App only" wording; the full Node suite is green again.
+- **Manifest.** `dsh.plugin.json` declares `0.2.2-rc.5` as compatible.
+- **Documentation.** Compatibility matrix, install requirements, packaging
+  layout, and known limitations were corrected.
+
+## Verified on a real DSH 0.2.2-rc.5 host
+
+- All **28 tools** are visible to the model and executable.
+- Vision: start, capture, diff, full frame, target-window PrintWindow, UIA
+  discovery, signed frame URLs.
+- Macro recording on the real desktop: 4 events captured, 2 steps produced.
+- Edge opened Douyin and scrolled through multiple videos.
+- Visual Studio opened, `hello.c` written and saved, compiled with MSVC, and
+  `hello.exe` printed `Hello, World!`.
+- Node: **206/206** tests pass. Python: **258/258** tests pass.
+
+## Packaging
+
+- PyInstaller **onedir** engine, no onefile extraction into `%TEMP%`.
+- `node_modules/uiohook-napi` is included, so macro recording works without a
+  separate `npm install`.
+- The Hear model is **not** bundled; download it on first use or set
+  `VHCU_MODEL_PATH`.
+- The zip is a DSH plugin bundle, not a standalone app. Running
+  `node scripts/install.mjs` registers the plugin in a DSH profile; DSH must be
+  installed and running for the panel and tools to work.
+
+## Installation
+
+1. Extract the zip to a stable folder.
+2. Install and enable `dsh-better-sidebar` in the same DSH profile.
+3. Run `node scripts/install.mjs` from the extracted folder.
+4. Restart DSH and open the VHCU sidebar panel.
+
+## Known Limitations
+
+- Edge/Chromium web content is not exposed through the current UIA tree; use
+  visual coordinates for page controls.
+- The four-corner emergency stop applies to the physical pointer; virtual
+  injection does not move the cursor, so use `physical`/`hybrid` when the stop
+  gesture matters.
+- Macro recording requires a real desktop host; headless launches do not receive
+  global `uiohook` events.
+- Windows 10/11 x64 only.
+
+---
+
 # v1.1.0 - Multimodal CUA & Background Capture
 
 **Release date:** 2026-11-22  
