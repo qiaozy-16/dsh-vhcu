@@ -1,154 +1,138 @@
-# VHCU V1.1.0 Release Notes
+# v1.1.0 - Multimodal CUA & Background Capture
 
-**Release date:** 2026-11-22
-**Platform:** Windows 10/11 x64, DSH Desktop App only
-**Engine:** `dist/vhcu-daemon/vhcu-daemon.exe` (PyInstaller onedir)
+**Release date:** 2026-11-22  
+**Platform:** Windows 10/11 x64, DSH Desktop App  
+**Engine:** `dist/vhcu-daemon/vhcu-daemon.exe` (PyInstaller onedir)  
 **Plugin version:** 1.1.0
 
-V1.1.0 is the release-hardening and interaction-quality release. It keeps the
-local-first architecture and the existing safety model, and adds precision
-capture, semantic UIA control, a non-intrusive virtual cursor, and stronger
-execution integrity.
+V1.1.0 turns VHCU into a guarded multimodal computer-use layer: precision
+background capture, semantic UIA control, a non-intrusive virtual cursor,
+system-audio transcription, and macro recovery behind one contract. The public
+surface remains 28 tools, 10 routes, and one sidebar panel.
 
-## 2026-11-21 Post-acceptance hardening
+## Features
 
-- `vhcu_get_memory_clipboard` now renders the stored text to the model instead
-  of only showing its character count.
-- `vhcu_find_elements` uses the configurable `uiaDefaultDepth` setting
-  (default 6, range 1-10); a per-call `max_depth` still overrides it.
-- Web content inside Edge/Chromium is not exposed by the current UIA tree; use
-  visual coordinates for page controls (tracked for V1.2).
-- Arrow and navigation keys are emitted with `KEYEVENTF_EXTENDEDKEY`; this fixes
-  `alt+left` navigation in Explorer.
-- The virtual cursor no longer strokes the enlarged glow triangle, removing the
-  stray white line below the pointer while retaining the solid cursor rim.
-- The shared settings store refreshes from disk and watches its directory, and
-  updates merge only fields that changed locally; stale windows no longer
-  overwrite another window's privacy/managed-mode choice.
+- **Intelligent Background Capture.** `precision_mode` on
+  `vhcu_get_full_frame` / `vhcu_capture_target` returns native physical pixels
+  when the global precision switch is enabled. The panel exposes a live
+  high-precision indicator; denied requests return `precision_denied: true`
+  rather than silently downscaling.
+- **Multimodal CUA timeline.** Vision diffs and loopback-audio transcripts are
+  fused into a 1.5-second event stream. `vhcu_get_multimodal_events` returns
+  `vision`, `hear`, `both`, or `hear`-only records with stable IDs.
+- **UIA semantic control.** Opaque `element_id` tokens, InvokePattern-first
+  clicks, configurable `uiaDefaultDepth` (1-10, default 6), stale fingerprints,
+  and an isolated COM worker. Password fields are redacted from model output.
+- **Virtual cursor over PostMessage.** `virtual` mode posts mouse messages
+  without moving the physical pointer. `hybrid` selects physical, virtual, or
+  UIA input per call and falls back to physical input on blocked surfaces.
+- **Macro engine with breakpoint recovery.** `session_state.json` records queue
+  progress; Resume/Discard survives restarts. Image-relative queues are discarded
+  across restarts instead of being replayed blindly.
+- **Macro governance.** Model-side self-generation is opt-in. Until enabled,
+  `vhcu_save_macro` returns `E_MACRO_GENERATION_DISABLED`. When enabled, the
+  model can persist parameterized macros and portable semantic metadata without
+  per-application adapters.
+- **Onedir release engine.** PyInstaller onedir output, no onefile extraction
+  into `%TEMP%`. The Hear model remains an optional external asset.
 
----
+### Phase 1-11 consolidation
 
-## Four Defining Capabilities
+- **Phase 1-2:** contract-first NDJSON, monotonic sequence numbers, absolute
+  `deadlineMs`, signed frame URLs, and fail-closed frame handling.
+- **Phase 3-4:** isolated UIA worker, element registry, stale-bounds checks,
+  privacy gates on discovery and invocation, explicit `E_PRIVACY_BLOCKED`
+  taxonomy.
+- **Phase 5:** in-flight injection counter, modifier/button force-release, and
+  the PostMessage blocklist with Chromium support.
+- **Phase 6:** coordinate transforms and image-origin mapping, readback gate,
+  stale-frame refusal, DPI-aware UIA bounds.
+- **Phase 7-8:** atomic macro store, opt-in self-generation, reusable-action
+  validation, 100-step cap, 20-macro queue cap, and destructive-action approval.
+- **Phase 9:** memory watermark, frame retention limits, cache cleanup, PID
+  reclamation, and orphan-daemon detection.
+- **Phase 10:** layered virtual-cursor overlay, glow/ripple rendering, and
+  click-through behavior.
+- **Phase 11:** shared settings watcher, field-level settings merge, clipboard
+  renderer, configurable UIA depth, extended navigation keys, and semantic macro
+  metadata.
 
-### Game War intelligent see-through
+## Bug Fixes
 
-- `vhcu_get_full_frame` and `vhcu_capture_target` accept `precision_mode`
-  (default `false`).
-- With the global **Allow high-precision vision** switch enabled (default on),
-  the capture returns 100% physical pixels: no PNG downscale,
-  `image_width == width`, `scale_factor == 1`.
-- A green **High-precision capture** indicator appears in the panel and clears
-  after 15 seconds, on the next normal capture, or when vision stops.
-- If the global switch is off, the tool returns normally with
-  `precision_denied: true` and an explicit message instead of pretending.
-- Intended for dense, fast-changing surfaces: game HUDs/combat views, CAD and
-  Blender viewports, charts, and small labels. No overlay, no injection into
-  protected processes, no anti-cheat bypass.
+- `vhcu_get_memory_clipboard` now returns the stored text to the model instead
+  of only a character count.
+- Settings are refreshed from disk and merged field-by-field; stale sidebar
+  windows can no longer overwrite privacy or managed-mode changes.
+- `alt+left` works in Explorer: arrow and navigation keys carry
+  `KEYEVENTF_EXTENDEDKEY` and no longer look like numeric-keypad input.
+- The virtual cursor glow no longer draws an outer white outline; the stray
+  white line under the pointer is gone.
+- UIA `value` is rendered for non-password fields when `allowUiaValueRead` is
+  enabled; password fields remain redacted even when the switch is on.
+- UIA depth is no longer hard-coded. `uiaDefaultDepth` defaults to 6 and accepts
+  1-10; per-call `max_depth` still wins.
+- Input privacy violations use `E_PRIVACY_BLOCKED` consistently across capture,
+  UIA, and keyboard/mouse tools.
+- Expired commands are dropped before dispatch; orphaned daemons are reclaimed
+  through process identity checks rather than broad process-name kills.
+- The virtual-cursor overlay is excluded from model-facing captures and restored
+  afterward, so the overlay is never mistaken for application content.
 
-### UIA semantic-level control
+## Security
 
-- `vhcu_find_elements` returns opaque element tokens for Windows UI Automation
-  elements, with stale fingerprints and bounds checks.
-- `vhcu_click_element` prefers **InvokePattern**; elements without Invoke fall
-  back to their physical center.
-- New `uia` injection mode resolves the element under a screen point and invokes
-  it directly, falling back to a coordinate click only when required.
-- Password fields never expose `Value`; UIA discovery and invocation are blocked
-  on privacy-blacklisted target windows before any thread starts.
-- UIA timeouts mark the worker unhealthy and require a daemon restart instead of
-  retrying a stuck COM call.
+- **Privacy hard block.** A blacklisted foreground title returns
+  `E_PRIVACY_BLOCKED`; capture, UIA discovery, UIA invocation, and input all fail
+  closed. The developer bypass is explicit and leaves a permanent warning.
+- **Password redaction.** UIA never calls `ValuePattern` for password fields; the
+  model-facing renderer applies a second redaction guard.
+- **Forced readback.** Click, type, scroll, and drag require visual confirmation
+  before the next action. Turbo mode relaxes only explicitly supported tools.
+- **Coordinate and focus guards.** Out-of-bounds points are rejected; the
+  foreground window is asserted before injection; the four screen corners act as
+  an operator emergency stop.
+- **Macro approval.** Destructive macros require user approval unless managed
+  approval is enabled, which keeps a persistent red warning.
+- **Untrusted data.** Screen text, UIA names, and audio transcripts are wrapped
+  as `<untrusted_screen_data>` and treated as data.
+- **Local-only data.** No telemetry, remote capture service, or cloud audio path.
+  The optional Hear model download is the only expected network access.
 
-### Background, non-intrusive virtual cursor
+## Known Issues
 
-- `virtual` mode posts mouse messages to the target window without moving the
-  physical cursor; the layered click-through overlay shows the AI's virtual
-  position.
-- Chromium/Electron child surfaces are supported after real-world verification;
-  CEF and UWP shells stay in the PostMessage blocklist and `hybrid` falls back to
-  physical input.
-- Virtual mode no longer triggers the user-takeover soft pause, because physical
-  mouse movement is unrelated to the injected messages.
-- `hybrid` supports a per-call `preferred_method` on `vhcu_mouse_click`
-  (`physical` / `virtual` / `uia`).
-
-### Resilience triad: recovery, precision, macro governance
-
-- **Recovery:** `session_state.json` records macro-queue progress; the panel
-  offers Resume/Discard, now also on the web client. Image-relative queues are
-  discarded across restarts.
-- **Precision governance:** a global permission plus a live indicator, so the
-  user always sees when the model is using physical-pixel capture.
-- **Macro governance:** model-side macro self-generation is off by default;
-  `vhcu_save_macro` returns `E_MACRO_GENERATION_DISABLED` until the user enables
-  it, and the panel shows the interception notice.
-- **Execution integrity:** expired commands are refused before dispatch; orphaned
-  daemons are reclaimed through per-process PID records with strict identity
-  checks; modifiers and mouse buttons are force-released on startup and shutdown.
-
----
-
-## Additional Improvements
-
-- Full virtual-desktop capture and injection, including monitors at negative
-  coordinates, with image-origin-aware scaling.
-- DPI-aware UIA bounds normalization and explicit `bounds_space` handling.
-- Safer concurrent input state: an in-flight injection counter replaces the
-  previous boolean, so overlapping actions cannot leave injection state stuck.
-- Chromium `PostMessage` support relaxed; CEF/UWP remain blocked.
-- Privacy gates extended to UIA discovery and invocation, with a single
-  `E_PRIVACY_BLOCKED` taxonomy.
-- Web recovery buttons no longer disabled by the web platform flag.
-- `deadlineMs` is now an absolute epoch deadline end-to-end; expired commands are
-  dropped instead of executed later.
-- Orphan daemon reclamation before binding, with parent-liveness and process
-  creation-time checks.
-- Plugin-list icon restored (512x512 `assets/icon.png`).
-- Four plain-language injection-mode labels in the settings panel.
-- First-run onboarding, offline wheelhouse, and path-sandbox guarantees retained.
-
----
+- **Edge/Chromium web content is not exposed through the current UIA tree.**
+  Page controls must use visual coordinates; browser web-content UIA is deferred
+  to V1.2.
+- **UWP/CEF PostMessage injection is limited.** Use `physical` or `hybrid`
+  fallback; some surfaces reject posted messages by design.
+- **Multi-monitor and complex DPI layouts are not fully validated in V1.1.**
+- **The bundled Hear model (`base`) has limited accuracy under strong background
+  noise.**
+- Windows 10/11 x64 only; no macOS or Linux engine in V1.1.
 
 ## Upgrade Notes
 
-1. Replace the plugin folder (or junction target) with the 1.1.0 build.
-2. Ensure `dsh-better-sidebar` is enabled in the same DSH profile.
-3. Restart DSH so the host plugin and sidebar bundle reload.
-4. Replace `dist/vhcu-daemon/` with the rebuilt 1.1.0 engine; do not mix
-   `_internal/` files from older builds.
-5. Settings are migrated automatically; new keys default to:
-   `allowHighPrecisionVision: true`, `enableMacroAutoGeneration: false`.
-6. External consumers of the contract should add
-   `E_MACRO_GENERATION_DISABLED` to their error table.
-
----
+1. Replace the plugin folder or junction target with the V1.1.0 build.
+2. Replace `dist/vhcu-daemon/` as a whole; do not mix `_internal/` files from an
+   older engine.
+3. Ensure `dsh-better-sidebar` is enabled in the same DSH profile.
+4. Restart DSH so the host plugin and sidebar bundle reload.
+5. New settings default to `uiaDefaultDepth: 6`,
+   `allowHighPrecisionVision: true`, and `enableMacroAutoGeneration: false`.
+6. Contract consumers should use `E_PRIVACY_BLOCKED` for privacy refusals and
+   `E_MACRO_GENERATION_DISABLED` for disabled self-growth.
 
 ## Release Artifact
 
-```
+```text
 dist/
   vhcu-daemon/
     vhcu-daemon.exe
     _internal/...
 ```
 
-The engine is a PyInstaller **onedir** build (no onefile extraction into
-`%TEMP%`). The Hear model is not bundled; use the offline model pack or allow the
-one-time download.
+The engine is a PyInstaller onedir build. The Hear model is not bundled; use the
+offline model pack or allow the one-time download.
 
----
+## License
 
-## Known Limitations
-
-- Edge/Chromium web content is not visible through the current UIA tree; use
-  visual coordinates for page controls. Browser web-content UIA is tracked for
-  V1.2.
-- UWP/CEF PostMessage injection is limited; use `physical` or `hybrid` fallback.
-- The bundled Hear model (`base`) has limited accuracy under strong background
-  noise.
-- Multi-monitor and complex DPI layouts are not fully adapted in V1.1.
-- Windows 10/11 x64 only; no macOS/Linux engine in V1.1.
-- UWP/WinUI3 capture may lack a GDI back buffer; WGC fallback is deferred.
-- CEF/UWP windows reject PostMessage; use `physical` or `hybrid`.
-- Visual diff remains cell-sampled; precision mode improves PNG fidelity, not the
-  diff grid.
-- High-precision 4K frames are large; use them only when necessary.
+MIT. See `LICENSE`.
