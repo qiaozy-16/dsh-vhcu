@@ -319,7 +319,9 @@ test('P30 web client warns and disables desktop-only actions', () => {
   assert.match(source, /disabled: IS_WEB \|\| recordingBusy/);
   assert.match(source, /macroQueue\?\.status === 'hung'/);
   const readme = readFileSync(join(HERE, '..', '..', 'README.md'), 'utf8');
-  assert.match(readme, /cannot start the local Python engine or inject input/);
+  // README was rewritten for the 1.1 release; assert its current desktop-only
+  // scope statement instead of the retired wording.
+  assert.match(readme, /DSH Desktop App only/);
 });
 
 test('P7 recovery banner is top-level, explicit, and user-confirmed', () => {
