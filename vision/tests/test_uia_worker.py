@@ -150,9 +150,13 @@ class NormalizeRequestTest(unittest.TestCase):
         )
         self.assertEqual(hwnd, 12)
         self.assertEqual(locator["name_match"], "exact")
-        self.assertEqual(options["max_depth"], 10)
+        self.assertEqual(options["max_depth"], 6)
         self.assertEqual(options["limit"], 50)
         self.assertTrue(options["include_offscreen"])
+
+    def test_explicit_depth_is_preserved(self):
+        _, _, options = normalize_find_request(12, {}, {"max_depth": 9})
+        self.assertEqual(options["max_depth"], 9)
 
     def test_invalid_fields_are_rejected(self):
         for kwargs in (

@@ -1,6 +1,6 @@
 # VHCU V1.1.0 Release Notes
 
-**Release date:** 2026-11-20
+**Release date:** 2026-11-22
 **Platform:** Windows 10/11 x64, DSH Desktop App only
 **Engine:** `dist/vhcu-daemon/vhcu-daemon.exe` (PyInstaller onedir)
 **Plugin version:** 1.1.0
@@ -14,8 +14,10 @@ execution integrity.
 
 - `vhcu_get_memory_clipboard` now renders the stored text to the model instead
   of only showing its character count.
-- `vhcu_find_elements` defaults to UIA depth 10, so Edge/Chromium page controls
-  are visible without an explicit `max_depth`.
+- `vhcu_find_elements` uses the configurable `uiaDefaultDepth` setting
+  (default 6, range 1-10); a per-call `max_depth` still overrides it.
+- Web content inside Edge/Chromium is not exposed by the current UIA tree; use
+  visual coordinates for page controls (tracked for V1.2).
 - Arrow and navigation keys are emitted with `KEYEVENTF_EXTENDEDKEY`; this fixes
   `alt+left` navigation in Explorer.
 - The virtual cursor no longer strokes the enlarged glow triangle, removing the
@@ -137,6 +139,13 @@ one-time download.
 
 ## Known Limitations
 
+- Edge/Chromium web content is not visible through the current UIA tree; use
+  visual coordinates for page controls. Browser web-content UIA is tracked for
+  V1.2.
+- UWP/CEF PostMessage injection is limited; use `physical` or `hybrid` fallback.
+- The bundled Hear model (`base`) has limited accuracy under strong background
+  noise.
+- Multi-monitor and complex DPI layouts are not fully adapted in V1.1.
 - Windows 10/11 x64 only; no macOS/Linux engine in V1.1.
 - UWP/WinUI3 capture may lack a GDI back buffer; WGC fallback is deferred.
 - CEF/UWP windows reject PostMessage; use `physical` or `hybrid`.

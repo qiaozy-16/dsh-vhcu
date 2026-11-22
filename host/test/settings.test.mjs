@@ -51,6 +51,14 @@ test('P6 settings merge fills missing defaults and ignores bad values', () => {
   assert.equal(sanitizeBlacklist('not-array').length, 0);
 });
 
+test('UIA depth is configurable, defaulting to 6 and clamped to 1..10', () => {
+  assert.equal(DEFAULT_SETTINGS.uiaDefaultDepth, 6);
+  assert.equal(mergeSettings(DEFAULT_SETTINGS, { uiaDefaultDepth: 9 }).uiaDefaultDepth, 9);
+  assert.equal(mergeSettings(DEFAULT_SETTINGS, { uiaDefaultDepth: 0 }).uiaDefaultDepth, 6);
+  assert.equal(mergeSettings(DEFAULT_SETTINGS, { uiaDefaultDepth: 11 }).uiaDefaultDepth, 6);
+  assert.equal(mergeSettings(DEFAULT_SETTINGS, { uiaDefaultDepth: '7' }).uiaDefaultDepth, 7);
+});
+
 test('P6 corrupt settings are backed up, never silently ignored', () => {
   const { dir, path } = tempPath('corrupt');
   try {

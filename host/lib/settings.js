@@ -32,6 +32,7 @@ export const DEFAULT_SETTINGS = Object.freeze({
   allowHighPrecisionVision: true,
   enableMacroAutoGeneration: false,
   allowUiaValueRead: false,
+  uiaDefaultDepth: 6,
   privacyBlockMode: 'warning_image',
   retryMaxAttempts: 3,
   privacyBlacklist: Object.freeze(['密码', '银行', '隐私', 'Password', 'Login', '私人']),
@@ -66,6 +67,12 @@ function normalizedRetries(value) {
   return Math.max(0, Math.min(5, Math.trunc(parsed)));
 }
 
+function normalizedUiaDepth(value) {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 1 || parsed > 10) return DEFAULT_SETTINGS.uiaDefaultDepth;
+  return parsed;
+}
+
 function baseSettings(current = {}) {
   const blacklistProvided = Array.isArray(current.privacyBlacklist);
   const blacklist = sanitizeBlacklist(current.privacyBlacklist);
@@ -90,6 +97,7 @@ function baseSettings(current = {}) {
     allowHighPrecisionVision: current.allowHighPrecisionVision !== false,
     enableMacroAutoGeneration: current.enableMacroAutoGeneration === true,
     allowUiaValueRead: Boolean(current.allowUiaValueRead),
+    uiaDefaultDepth: normalizedUiaDepth(current.uiaDefaultDepth ?? DEFAULT_SETTINGS.uiaDefaultDepth),
     privacyBlockMode: current.privacyBlockMode === 'black_image' ? 'black_image' : 'warning_image',
     retryMaxAttempts: normalizedRetries(current.retryMaxAttempts ?? DEFAULT_SETTINGS.retryMaxAttempts),
     privacyBlacklist: blacklistProvided ? blacklist : [...DEFAULT_SETTINGS.privacyBlacklist],
@@ -135,6 +143,12 @@ export function mergeSettings(current, patch) {
   }
   if (typeof patch.allowUiaValueRead === 'boolean') {
     next.allowUiaValueRead = patch.allowUiaValueRead;
+  }
+  if (patch.uiaDefaultDepth !== undefined) {
+    const parsed = Number(patch.uiaDefaultDepth);
+    if (Number.isInteger(parsed) && parsed >= 1 && parsed <= 10) {
+      next.uiaDefaultDepth = parsed;
+    }
   }
   if (patch.privacyBlockMode === 'warning_image' || patch.privacyBlockMode === 'black_image') {
     next.privacyBlockMode = patch.privacyBlockMode;

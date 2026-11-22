@@ -333,6 +333,13 @@ telemetry endpoint.
 ## Limitations
 
 - Windows 10/11 x64 only; no macOS/Linux implementation in V1.1.
+- Edge/Chromium web content is not exposed through the current UIA tree; page
+  controls must be driven with visual coordinates. Browser web-content UIA is
+  tracked for V1.2.
+- UWP/CEF PostMessage injection is limited and may require physical fallback.
+- The bundled Hear model (`base`) has limited recognition accuracy under strong
+  background noise.
+- Multi-monitor and complex DPI layouts are not fully adapted in V1.1.
 - UWP/WinUI3 windows may lack a usable GDI back buffer; WGC fallback is deferred.
 - CEF/UWP PostMessage is blocked by design; `hybrid` falls back to physical input.
 - Visual diff is full-resolution but cell-sampled for performance; precision mode

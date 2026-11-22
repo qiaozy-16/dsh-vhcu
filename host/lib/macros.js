@@ -19,6 +19,8 @@ import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 
+import { normalizeSemantic } from './semantic-macros.js';
+
 const MAX_MACROS = 100;
 const MAX_STEPS = 100;
 const MAX_NAME = 64;
@@ -260,18 +262,20 @@ export function seedMacros() {
 }
 
 /** Unique {{variable}} names referenced by type steps, in first-use order. */
-export function macroVariables(steps) {
+export function macroVariables(steps, semantic = null) {
   const names = [];
   const pattern = /\{\{([a-zA-Z0-9_]+)\}\}/g;
+  const scan = (value) => {
+    if (typeof value !== 'string' || !value.includes('{{')) return;
+    for (const match of value.matchAll(pattern)) {
+      if (!names.includes(match[1])) names.push(match[1]);
+    }
+  };
   for (const step of steps ?? []) {
     if (!step || typeof step !== 'object') continue;
-    for (const value of Object.values(step)) {
-      if (typeof value !== 'string' || !value.includes('{{')) continue;
-      for (const match of value.matchAll(pattern)) {
-        if (!names.includes(match[1])) names.push(match[1]);
-      }
-    }
+    for (const value of Object.values(step)) scan(value);
   }
+  for (const value of Object.values(semantic?.params ?? {})) scan(value);
   return names;
 }
 
@@ -345,9 +349,9 @@ function coord(value, label) {
   return int(value, label, 0, 100000);
 }
 
-export function normalizeSteps(raw) {
-  if (!Array.isArray(raw) || raw.length === 0 || raw.length > MAX_STEPS) {
-    fail('E_PROTO', `steps must be an array of 1..${MAX_STEPS} operations`);
+export function normalizeSteps(raw, { allowEmpty = false } = {}) {
+  if (!Array.isArray(raw) || (!allowEmpty && raw.length === 0) || raw.length > MAX_STEPS) {
+    fail('E_PROTO', `steps must be an array of ${allowEmpty ? '0' : '1'}..${MAX_STEPS} operations`);
   }
   return raw.map((step, index) => {
     if (!step || typeof step !== 'object' || !STEP_OPS.includes(step.op)) {
@@ -412,11 +416,12 @@ export function normalizeMacro(raw, { requireEnabled = false } = {}) {
   const description = String(raw.description ?? '').slice(0, MAX_DESC);
   const category = normalizeCategory(raw.category);
   const target_app = String(raw.target_app ?? '').trim().slice(0, 80) || null;
+  const semantic = normalizeSemantic(raw.semantic);
   const steps = normalizeSteps(raw.steps);
   const enabled = requireEnabled ? Boolean(raw.enabled) : raw.enabled !== false;
   const builtin = Boolean(raw.builtin);
   const is_destructive = Boolean(raw.is_destructive);
-  return { name, description, category, target_app, builtin, steps, enabled, is_destructive };
+  return { name, description, category, target_app, builtin, steps, semantic, enabled, is_destructive };
 }
 
 function normalizeCategoryEntry(raw) {

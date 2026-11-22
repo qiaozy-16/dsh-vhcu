@@ -56,6 +56,9 @@ test('P4.3 UIA find/click are gated by privacy on both daemon and Node', () => {
   // D5: the gate reports the same privacy taxonomy as the daemon-side UIA gate.
   const gateBlock = hostSource.slice(gate, gate + 320);
   assert.match(gateBlock, /code: 'E_PRIVACY_BLOCKED'/);
+  const inputGate = hostSource.indexOf('隐私保护已触发：AI 已暂停，禁止任何键鼠注入');
+  assert.ok(inputGate > 0, 'input privacy gate message must exist');
+  assert.match(hostSource.slice(inputGate, inputGate + 220), /code: 'E_PRIVACY_BLOCKED'/);
 });
 
 test('P4.4 timed-out UIA worker is marked unhealthy and refuses new work', () => {
