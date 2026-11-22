@@ -20,22 +20,31 @@ coordinates, and settings stay on the machine.
 
 ## DSH Compatibility
 
-| DSH Desktop release | Status | Notes |
+VHCU is validated against a specific DSH Desktop release line. Patch releases
+inside a verified line are expected to remain compatible, but every host upgrade
+should still be smoke-tested because DSH evolves quickly.
+
+| DSH Desktop line | Status | Notes |
 |---|---|---|
-| **0.2.2-rc.5** | **Tested / supported** | Real-host validation on 2026-11-22: 28 tools, vision, UIA, capture, macro recording, Edge/Douyin, Visual Studio C build |
-| 0.2.1-rc.3 | Supported | Baseline for 1.1.0; Node 206/206, Python 258/258 |
-| 0.2.1-rc.2 | Declared compatible | Listed in `dsh.plugin.json`; not re-tested in 1.1.1 |
-| 0.2.0-rc.2 | Declared compatible | Listed in `dsh.plugin.json`; legacy |
-| Other / older | Not supported | Host API drift is not covered |
+| **0.2.2.x** | **Verified** | Smoke-tested on `0.2.2-rc.5`: tools, vision, UIA, capture, recording, browser and editor workflows |
+| 0.2.1.x | Verified | Smoke-tested on `0.2.1-rc.3`; retained as the 1.1.x baseline |
+| 0.2.0.x | Declared | Listed in `dsh.plugin.json`; not covered by the current smoke suite |
+| Other / older | Unsupported | Host API drift is outside the support window |
 
-DSH `0.2.2` splits the tool executor into `dsh-tool-executor-native`
-(enabled by default) and `dsh-tool-executor-ptc` (disabled by default).
-VHCU needs the native executor; do not disable it. The old `tools.mode`
-configuration is gone in 0.2.2.
+Status meanings:
 
-> Upgrading DSH can reset a custom profile's bundle list. After a DSH upgrade,
-> re-enable `dsh-vhcu` (and `dsh-better-sidebar`) in the Plugins page or restore
-> the profile's `dsh.profile.bundles`, then restart DSH.
+- **Verified** — the release line has been exercised on a real DSH Desktop host.
+- **Declared** — the manifest allows the line, but no current end-to-end test covers it.
+- **Unsupported** — the host API contract may have changed; install at your own risk.
+
+DSH `0.2.2` and newer split the tool executor into
+`dsh-tool-executor-native` (enabled by default) and `dsh-tool-executor-ptc`
+(disabled by default). VHCU requires the native executor. Older `tools.mode`
+configuration is no longer supported.
+
+> DSH upgrades can reset a custom profile's bundle list. If the plugin appears
+> disabled after an upgrade, re-enable `dsh-vhcu` and `dsh-better-sidebar` in
+> the Plugins page (or restore `dsh.profile.bundles`) and restart DSH.
 
 ## Core Capabilities
 
