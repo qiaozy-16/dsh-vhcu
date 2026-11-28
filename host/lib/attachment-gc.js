@@ -52,6 +52,9 @@ export async function cleanupAttachments({ registry, root, trash = trashFiles, k
   }
 
   const okPaths = new Set(results.filter((entry) => entry?.ok).map((entry) => entry.path));
+  // Which recycle-bin backend actually handled the batch ('electron' / 'powershell').
+  // Surfaced so a user can confirm the Electron path works in the real host.
+  const via = [...new Set(results.filter((entry) => entry?.ok && entry.via).map((entry) => String(entry.via)))];
   const trashed = present.filter((item) => okPaths.has(item.path));
   const byPath = new Map(present.map((item) => [item.path, item]));
   const failed = results
@@ -76,6 +79,7 @@ export async function cleanupAttachments({ registry, root, trash = trashFiles, k
     missing: missing.length,
     forgotten,
     freedBytes,
+    via,
     failed,
     stats: registry.stats(),
     revision: registry.revision,

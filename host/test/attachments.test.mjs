@@ -163,11 +163,13 @@ test('attachments: cleanup trashes only existing files, forgets missing ones', a
       keepBytes: 0,
       trash: async (paths) => {
         trashed.push(...paths);
-        return paths.map((path) => (path.includes(failingId) ? { path, ok: false, error: 'locked' } : { path, ok: true }));
+        return paths.map((path) =>
+          path.includes(failingId) ? { path, ok: false, error: 'locked' } : { path, ok: true, via: 'electron' });
       },
     });
 
     assert.equal(result.trashed, 1);
+    assert.deepEqual(result.via, ['electron'], 'the recycle-bin backend is reported for confirmation');
     assert.equal(result.missing, 1, 'a ledger entry whose object vanished is just forgotten');
     assert.equal(result.failed.length, 1);
     assert.equal(result.failed[0].id, failingId);

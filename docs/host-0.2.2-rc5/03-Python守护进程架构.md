@@ -217,7 +217,9 @@ Node supervisor.spawn(python, ['-u','-m','vhcu_daemon','--parent-pid',<hostPid>,
 - **PNG 编码优化**（2026-11-28）：`vision/vhcu_daemon/png.py` 从"filter 0 + zlib level 3"改为
   **逐行选择 Sub/Up/Paeth 滤波（numpy 向量化）+ zlib level 6**。真实 1280×720 桌面帧实测
   560,798 B → 449,042 B（**-19.6%**），编码 ~300 ms。level 9 只再省 2.5% 却要 ~1 s，故不采用；
-  无 numpy 时回退 filter 0（仍是 level 6）。附件库按字节封顶，所以这一项直接决定配额能撑多久。README 的 "short-lived signed URLs"（`README.md:88`）因此只对 Node 层成立。
+  无 numpy 时回退 filter 0（仍是 level 6）。附件库按字节封顶，所以这一项直接决定配额能撑多久。
+  **格式决策（2026-11-28，用户拍板）**：坚决不改 JPEG——CUA 需要无损 PNG 保证文字边缘锐利，
+  这直接关系 OCR 与坐标定位；449 KB/张配合 500 MiB 配额已够用，不为省空间牺牲精度。README 的 "short-lived signed URLs"（`README.md:88`）因此只对 Node 层成立。
 - `/interrupt` 是唯一能在命令循环卡住时打断的通道：Node 直接 POST，Python 侧 set `InterruptController`（`httpframe.py:125-136`；`cli.py:770-778`）。`InterruptController` 是 `threading.Event`，InputController 每个步骤与可中断 sleep 都 check（`interrupts.py:23-60`；`input.py:599-601,1730-1734`）。
 
 ### 3.8 PID 记录与单实例（`pidfile.py`）

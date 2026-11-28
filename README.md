@@ -133,6 +133,11 @@ automatically, and the service exposes no delete or list API. VHCU therefore:
 Cleaning can invalidate VHCU screenshots in older chat history — the UI says so
 next to the button.
 
+Screenshots stay lossless PNG on purpose. JPEG would cut the payload several
+times over, but CUA depends on razor-sharp glyph edges for OCR and coordinate
+picking; 449 KB per frame against a 500 MiB budget is a trade worth keeping. The
+encoder picks a PNG filter per row and still uses RGB, no lossy step anywhere.
+
 ## Architecture
 
 ```mermaid
