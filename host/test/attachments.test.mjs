@@ -129,6 +129,20 @@ test('attachments: reclaim selects oldest first and keeps recent entries', () =>
     assert.equal(registry.count, 2);
     assert.deepEqual(registry.list().map((item) => item.id), ['2'.repeat(64), '3'.repeat(64)]);
 
+    // Default policy (no explicit targets): keep the newest 10%, at least one.
+    const policyDir = tempDir('policy');
+    try {
+      const policy = new AttachmentRegistry({ path: join(policyDir, 'registry.json') });
+      for (let i = 0; i < 20; i += 1) {
+        policy.record({ id: i.toString(16).padStart(2, '0').repeat(32), bytes: 1000, at: i + 1 });
+      }
+      const defaultSelection = policy.selectForReclaim();
+      assert.equal(defaultSelection.length, 18, '20 entries -> keep newest 2');
+      assert.equal(defaultSelection[0].id, '00'.repeat(32), 'oldest goes first');
+    } finally {
+      rmSync(policyDir, { recursive: true, force: true });
+    }
+
     // Byte budget alone can force a reclaim even under the count target.
     const byBytes = registry.selectForReclaim({ keepCount: 100, keepBytes: 1000 });
     assert.equal(byBytes.length, 1);
@@ -175,6 +189,8 @@ test('attachments: cleanup trashes only existing files, forgets missing ones', a
     assert.equal(result.failed[0].id, failingId);
     assert.ok(!JSON.stringify(result.failed).includes(root), 'failures must not leak absolute paths');
     assert.deepEqual(registry.list().map((item) => item.id), [failingId], 'failed entries stay for a retry');
+    assert.equal(result.keptCount, 1, 'the surviving count is reported for the UI');
+    assert.equal(result.keptBytes, 300);
     assert.equal(trashed.length, 2, 'only existing files are handed to the recycle bin');
   } finally {
     rmSync(dir, { recursive: true, force: true });

@@ -81,6 +81,8 @@ export async function cleanupAttachments({ registry, root, trash = trashFiles, k
     freedBytes,
     via,
     failed,
+    keptCount: registry.count,
+    keptBytes: registry.bytes,
     stats: registry.stats(),
     revision: registry.revision,
   };

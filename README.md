@@ -128,7 +128,9 @@ automatically, and the service exposes no delete or list API. VHCU therefore:
   Windows `SendToRecycleBin` fallback) — never a permanent delete, so a user can
   restore them and antivirus does not see a data-destroying plugin;
 - shows `Attachments: n/2000 · x/500 MB` in the panel, turns red near the cap and
-  offers a one-click cleanup that keeps the newest 200 screenshots.
+  offers a one-click cleanup that keeps the newest 10% (at least one screenshot)
+  and moves the rest to the recycle bin; below two attachments the button is
+  disabled as "nothing to clean".
 
 Cleaning can invalidate VHCU screenshots in older chat history — the UI says so
 next to the button.

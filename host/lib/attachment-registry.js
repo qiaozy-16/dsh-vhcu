@@ -22,11 +22,11 @@ export const ATTACHMENT_BYTE_LIMIT = 500 * 1024 * 1024;
 export const RECLAIM_KEEP_RATIO = 0.5;
 
 /**
- * A user-initiated cleanup keeps the newest N attachments (≈90 MB with the
- * filtered PNG encoder) and moves everything older to the recycle bin, so the
- * button always has a bounded, explainable effect instead of "delete all".
+ * A user-initiated cleanup keeps the newest 10% (at least one) and moves the
+ * oldest ~90% to the recycle bin. A dynamic ratio means one click always frees
+ * something visible (5 -> keep 1; 2000 -> keep 200) while recent context stays.
  */
-export const MANUAL_KEEP_COUNT = 200;
+export const MANUAL_KEEP_RATIO = 0.1;
 
 const ID_PATTERN = /^[a-f0-9]{64}$/;
 
@@ -180,10 +180,10 @@ export class AttachmentRegistry {
   selectForReclaim({ keepCount, keepBytes } = {}) {
     const countTarget = Number.isFinite(Number(keepCount))
       ? Math.max(0, Math.trunc(Number(keepCount)))
-      : Math.floor(this.countLimit * RECLAIM_KEEP_RATIO);
+      : Math.max(1, Math.floor(this.items.length * MANUAL_KEEP_RATIO));
     const byteTarget = Number.isFinite(Number(keepBytes))
       ? Math.max(0, Math.trunc(Number(keepBytes)))
-      : Math.floor(this.byteLimit * RECLAIM_KEEP_RATIO);
+      : Math.floor(this.byteLimit * MANUAL_KEEP_RATIO);
 
     const selected = [];
     let count = this.items.length;
