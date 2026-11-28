@@ -209,7 +209,10 @@ Node supervisor.spawn(python, ['-u','-m','vhcu_daemon','--parent-pid',<hostPid>,
 - 第一层（Node）：每个插件实例生成 32 字节 `frameSecret`，URL 含 `exp = now + 5min`，`sig = HMAC-SHA256(x|y|w|h|exp[|seq])`；校验用 `timingSafeEqual`，过期或签名不符返回 403（`lib/index.js:527-572,1706-1721`）。这是真正的「短期签名 URL」。
 - 第二层（Python）：`HttpFrameServer` 绑 `127.0.0.1`、端口 0（系统分配），token 为 daemon 启动时 `os.urandom(24).hex()`（`cli.py:134-142`；`httpframe.py:63-103`）。`/frame`、`/health`、`/interrupt` 都要求 `?token=`，用 `hmac.compare_digest` 比较（`httpframe.py:116-150`）。
 - 并发上限 2（`MAX_INFLIGHT=2`），超出 429（`httpframe.py:21,137-145`）；响应头带 `x-frame-size/origin/backend/blank/occluded/seq`（`httpframe.py:173-185`），Node 用 HEAD 取元数据（`host/lib/frames.js:97-147`）。
-- token 本身**没有过期时间**，只在 daemon 生命周期内有效；5 分钟 TTL 完全由 Node 层 `exp` 承担（事实）。README 的 "short-lived signed URLs"（`README.md:88`）因此只对 Node 层成立。
+- token 本身**没有过期时间**，只在 daemon 生命周期内有效；5 分钟 TTL 完全由 Node 层 `exp` 承担（事实）。
+- **Base64 双轨复用同一图床**（2026-11-28）：`visionPayloadMode='base64'`（或单次 `payload_mode_override`）时，
+  Node 不是把 URL 给模型，而是用同一组 `port/token/roi/seq` 再 `GET /frame` 一次，拿回 PNG 字节后编码成
+  `data:image/png;base64,...` 内联进工具结果。图床协议未改；失败时回退签名 URL，不影响原有链路。README 的 "short-lived signed URLs"（`README.md:88`）因此只对 Node 层成立。
 - `/interrupt` 是唯一能在命令循环卡住时打断的通道：Node 直接 POST，Python 侧 set `InterruptController`（`httpframe.py:125-136`；`cli.py:770-778`）。`InterruptController` 是 `threading.Event`，InputController 每个步骤与可中断 sleep 都 check（`interrupts.py:23-60`；`input.py:599-601,1730-1734`）。
 
 ### 3.8 PID 记录与单实例（`pidfile.py`）

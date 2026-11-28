@@ -91,6 +91,27 @@ a 100% physical-pixel PNG (`image_width == width`, `scale_factor == 1`) and show
 a live high-precision indicator. If the switch is off, the call returns normally
 with `precision_denied: true` instead of silently scaling.
 
+### Image transport: URL or inline Base64
+
+Some DSH builds cannot turn the signed `frame_url` into an image the model can
+see, which leaves the model effectively blind. VHCU therefore ships two
+transports, selectable globally or per call:
+
+- **`url` (default)** — the tool result embeds a short-lived signed URL. Cheapest
+  in tokens; requires the host to fetch the URL.
+- **`base64`** — the host re-reads the same frame from the daemon image plane and
+  inlines it as `data:image/png;base64,...`. Works even when the host cannot
+  fetch URLs, at the cost of a much larger tool result.
+
+Set `visionPayloadMode` in the settings panel, or pass
+`payload_mode_override: 'url' | 'base64'` on `vhcu_get_full_frame`,
+`vhcu_capture_target` or `vhcu_get_vision_events` to switch for one call. If a
+base64 read fails, the result falls back to the signed URL and reports
+`payload_mode_downgraded: true` — the screenshot itself is never lost.
+
+Base64 + `precision_mode` is capped at 1280 px wide (`payload_hint` explains
+why): a 100% physical-pixel screenshot would otherwise dominate the context.
+
 ## Architecture
 
 ```mermaid
