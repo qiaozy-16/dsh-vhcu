@@ -68,6 +68,13 @@ export const SOURCES = Object.freeze(['fake', 'mss', 'window']);
 /**
  * Error taxonomy. `retryable` drives supervisor policy; `hint` is what the UI
  * shows verbatim, so it must be actionable and never contain a stack trace.
+ *
+ * Scope note: this enum is the set of codes that may appear in a protocol
+ * `error`/`ack` frame, and it must mirror `vision/vhcu_daemon/protocol.py`
+ * ERROR_CODES (cross-checked by vision/tests/test_error_codes.py).
+ * `E_CONFIG` is deliberately NOT here: relative VHCU_* paths are rejected
+ * locally by host/lib/paths.js and by the daemon's PathConfigError before
+ * READY, so that code never reaches the wire.
  */
 export const ERROR_CODES = Object.freeze({
   E_PROTO: { retryable: false, hint: '协议帧不合法：检查字段/版本，必要时重启 daemon。' },

@@ -114,10 +114,19 @@ Node supervisor.spawn(python, ['-u','-m','vhcu_daemon','--parent-pid',<hostPid>,
 - 宏存储/队列/审批/断点续跑也在 Node 侧（`host/lib/macros.js`, `host/lib/session-state.js`, `host/lib/guards.js`）。Python 只负责「给定 steps 执行」（`input.run_macro`）和两个内置动作宏。
 
 **错误码的真实约束（重要事实）**：
-- 契约枚举有 37 个码（`contract/lib/contract.js:72-185`；ack/error schema 同步，`contract/schema/v1/ack.json`）。
-- Python `protocol.ERROR_CODES` 只有 29 个（`protocol.py:21-51`），**缺少** `E_MEMORY`、`E_CLIPBOARD`、`E_AUDIO_DEVICE`、`E_FOCUS_LOST`、`E_MACRO_FAILED`、`E_MACRO_GENERATION_DISABLED`、`E_MACRO_NOT_REUSABLE`、`E_SCRIPT_WRITE_DENIED`。
-- `ProtocolError.__init__` 对不在白名单里的 code 做 `E_INTERNAL` 兜底（`protocol.py:57`）。因此经 `_input()`/`_hear()` 包装的错误（`cli.py:785-803,830-836`）会把 `E_FOCUS_LOST`、`E_CLIPBOARD`、`E_AUDIO_DEVICE`、`E_MACRO_FAILED` **降级成 `E_INTERNAL`**；而 `Protocol.error()` 不校验 code，所以 `daemon.memory_watermark`（`cli.py:278-283`）里的 `E_MEMORY` 反而能原样发出。
-- 结论：模型/宿主看到的具体错误码与契约声明不完全一致。这不影响 NDJSON 合法性（`E_INTERNAL` 合法），但会影响重试策略与提示精度。
+- 契约枚举有 37 个码（`contract/lib/contract.js`；ack/error schema 同步，`contract/schema/v1/ack.json`）。
+- Python `protocol.ERROR_CODES` 有 **34 个**（2026-11-28 修正后）：契约 37 − Node 专用 3
+  （`E_MACRO_GENERATION_DISABLED`、`E_MACRO_NOT_REUSABLE`、`E_SCRIPT_WRITE_DENIED`）。
+  修正前只有 29 个，缺 5 个 daemon 实际会抛的码，导致经 `ProtocolError` 时被降级成 `E_INTERNAL`：
+  `E_CLIPBOARD`、`E_AUDIO_DEVICE`、`E_FOCUS_LOST`、`E_MACRO_FAILED`、`E_MEMORY`（**已补齐**）。
+- `E_CONFIG` 是**本地/启动期专用码**（`paths.PathConfigError`，相对路径的 VHCU_* 环境变量），
+  在 READY 之前就抛出，宿主看到的是 READY 超时，不会出现在协议帧里；因此它**不在**契约枚举中，
+  Python 侧单列为 `LOCAL_ONLY_CODES`。
+- `ProtocolError.__init__` 对不在白名单里的 code 仍做 `E_INTERNAL` 兜底（这是契约保护，保留）。
+  现在新增了两道护栏（`vision/tests/test_error_codes.py`）：
+  ① daemon 包里出现的每个 `E_*` 字面量必须在 `ERROR_CODES ∪ LOCAL_ONLY_CODES` 中；
+  ② Python 与 `contract/lib/contract.js` 的枚举做跨语言一致性校验（差集必须正好是那 3 个 Node 专用码）。
+- 结论：模型/宿主看到的错误码现在与契约声明一致；今后新增错误码必须同时改契约与白名单，否则测试会挂。
 
 ---
 

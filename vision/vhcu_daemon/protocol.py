@@ -48,7 +48,21 @@ ERROR_CODES = {
     "E_VIRTUAL_CURSOR_UNSUPPORTED",
     "E_VIRTUAL_CURSOR_FAILED",
     "E_CONFIRM_REQUIRED",
+    # ── Added 2026-11-28: codes this daemon already raised but that were being
+    # silently downgraded to E_INTERNAL by ProtocolError's whitelist check.
+    # Keep this set in sync with contract/lib/contract.js ERROR_CODES; the
+    # cross-language parity test (vision/tests/test_error_codes.py) enforces it.
+    "E_CLIPBOARD",  # input.type clipboard fallback (Windows clipboard busy)
+    "E_AUDIO_DEVICE",  # hear.start WASAPI loopback unavailable/enumeration timeout
+    "E_FOCUS_LOST",  # input.* foreground assertion failed before injection
+    "E_MACRO_FAILED",  # input.macro.run / steps macro step failure
+    "E_MEMORY",  # daemon memory watermark trip (emitted by cli.py)
 }
+
+# Codes that are local/startup-only and must NEVER travel in a protocol frame.
+# E_CONFIG is raised by PathConfigError during daemon construction (relative
+# VHCU_* env), i.e. before READY; the host observes it as a READY timeout.
+LOCAL_ONLY_CODES = {"E_CONFIG"}
 
 
 class ProtocolError(Exception):
