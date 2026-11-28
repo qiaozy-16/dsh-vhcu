@@ -51,26 +51,49 @@ export async function cleanupAttachments({ registry, root, trash = trashFiles, k
     }
   }
 
-  const okPaths = new Set(results.filter((entry) => entry?.ok).map((entry) => entry.path));
+  // A recycle-bin call that reports success but leaves the file in place is a
+  // failure, not a freed byte. The verified post-condition is what protects the
+  // ledger: forgetting an entry whose object is still on disk orphans it forever.
+  const stillPresent = [];
+  const okPaths = new Set();
+  for (const entry of results) {
+    if (!entry?.ok || !entry.path) continue;
+    if (existsSync(entry.path)) {
+      stillPresent.push(entry.path);
+      continue;
+    }
+    okPaths.add(entry.path);
+  }
   // Which recycle-bin backend actually handled the batch ('electron' / 'powershell').
-  // Surfaced so a user can confirm the Electron path works in the real host.
-  const via = [...new Set(results.filter((entry) => entry?.ok && entry.via).map((entry) => String(entry.via)))];
+  // Only reported for files that are really gone, not for claimed successes.
+  const via = [
+    ...new Set(
+      results
+        .filter((entry) => entry?.ok && entry.via && okPaths.has(entry.path))
+        .map((entry) => String(entry.via)),
+    ),
+  ];
   const trashed = present.filter((item) => okPaths.has(item.path));
   const byPath = new Map(present.map((item) => [item.path, item]));
-  const failed = results
-    .filter((entry) => !entry?.ok)
-    .map((entry) => ({
-      // Do not leak absolute paths to the UI; report the id and the reason.
-      id: byPath.get(entry.path)?.id ?? null,
-      error: String(entry?.error ?? 'unknown').slice(0, 200),
-    }));
+  const failed = [
+    ...results
+      .filter((entry) => !entry?.ok)
+      .map((entry) => ({ path: entry?.path, error: String(entry?.error ?? 'unknown') })),
+    ...stillPresent.map((path) => ({ path, error: 'still present after the recycle-bin call' })),
+  ].map((entry) => ({
+    // Do not leak absolute paths to the UI; report the id and the reason.
+    id: byPath.get(entry.path)?.id ?? null,
+    error: entry.error.slice(0, 200),
+  }));
 
   const forgetIds = [...trashed.map((item) => item.id), ...missing.map((item) => item.id)];
   const forgotten = registry.forget(forgetIds);
-  const freedBytes = [
-    ...trashed,
-    ...missing,
-  ].reduce((sum, item) => sum + item.bytes, 0);
+  const trashedBytes = trashed.reduce((sum, item) => sum + item.bytes, 0);
+  const missingBytes = missing.reduce((sum, item) => sum + item.bytes, 0);
+  // `freedBytes` keeps its old meaning (all ledger entries dropped) for callers
+  // that already read it; the UI must use `trashedBytes` so a batch of vanished
+  // objects can never look like a successful recycle-bin move.
+  const freedBytes = trashedBytes + missingBytes;
 
   return {
     ok: failed.length === 0,
@@ -79,6 +102,8 @@ export async function cleanupAttachments({ registry, root, trash = trashFiles, k
     missing: missing.length,
     forgotten,
     freedBytes,
+    trashedBytes,
+    missingBytes,
     via,
     failed,
     keptCount: registry.count,

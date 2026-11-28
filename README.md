@@ -122,15 +122,27 @@ automatically, and the service exposes no delete or list API. VHCU therefore:
 
 - keeps its own ledger (`attachments_registry.json`) of the attachments **it**
   created and only ever reclaims those ids;
+- resolves the store root by **probing the ledger against real files** instead of
+  assuming one layout: an explicit `VHCU_ATTACHMENTS_ROOT` wins, then
+  `DSH_HOME/attachments/v1`, then `~/.dsh/attachments/v1` (the documented default
+  home; the host process does not always receive `DSH_HOME`), then the legacy
+  `~/attachments/v1`. The scanned root is reported as `attachments.root` on
+  `GET /vhcu/state`, so a wrong path is visible instead of silently no-op;
 - stops generating attachments at **2000 images or 500 MiB** (whichever comes
   first) and silently falls back to the signed URL;
 - moves reclaimed files to the **OS recycle bin** (`shell.trashItem`, with a
   Windows `SendToRecycleBin` fallback) — never a permanent delete, so a user can
   restore them and antivirus does not see a data-destroying plugin;
+- **verifies every move**: a backend that claims success but leaves the file in
+  place is reported as a failure and the ledger entry is kept, so a failed run
+  can never report freed bytes that are still on disk. Cleanup also refuses to
+  touch the ledger (HTTP 503, `E_ATTACHMENTS_ROOT`) when no candidate root can be
+  verified against a single recorded id;
 - shows `Attachments: n/2000 · x/500 MB` in the panel, turns red near the cap and
   offers a one-click cleanup that keeps the newest 10% (at least one screenshot)
   and moves the rest to the recycle bin; below two attachments the button is
-  disabled as "nothing to clean".
+  disabled as "nothing to clean". The result line separates files actually moved
+  from ledger entries whose object was already gone.
 
 Cleaning can invalidate VHCU screenshots in older chat history — the UI says so
 next to the button.

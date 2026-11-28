@@ -48,13 +48,76 @@ export function attachmentObjectPath(root, id) {
   return join(root, 'objects', hex.slice(0, 2), hex);
 }
 
-/** Resolve the attachment root without trusting VHCU env paths (absolute only). */
-export function resolveAttachmentsRoot({ env = process.env, homeFallback } = {}) {
+/** Directory name of DSH's default home under the OS home (`~/.dsh`). */
+export const DSH_HOME_DIR_NAME = '.dsh';
+
+/**
+ * Candidate attachment-store roots, most specific first.
+ *
+ * The store lives at `<DSH_HOME>/attachments/v1`, and DSH's documented default
+ * home is `<homedir>/.dsh` (`@deepseek-ai/dsh-home-paths`). A host plugin runs
+ * inside the host process, which does NOT always receive `DSH_HOME` (that
+ * variable is injected into child processes), so `<home>/.dsh/...` must be a
+ * candidate. The legacy `<home>/attachments/v1` spelling is kept last for
+ * deployments that really use it.
+ */
+export function attachmentRootCandidates({ env = process.env, homeFallback } = {}) {
+  const dshHome = String(env.DSH_HOME ?? '').trim();
+  if (dshHome) return [join(dshHome, 'attachments', 'v1')];
+  const home = String(homeFallback ?? '').trim();
+  if (!home) return [];
+  return [
+    join(home, DSH_HOME_DIR_NAME, 'attachments', 'v1'),
+    join(home, 'attachments', 'v1'),
+  ];
+}
+
+/**
+ * Resolve the attachment root.
+ *
+ * An explicit `VHCU_ATTACHMENTS_ROOT` is the operator's assertion and is used
+ * as-is. Otherwise the ledger is probed against the real filesystem, so a host
+ * process without `DSH_HOME` still finds the true store instead of comparing
+ * every entry against a non-existent directory (which used to wipe the ledger
+ * and report freed bytes that were still on disk).
+ *
+ * With `requireExistingObjects`, an inferred root that contains neither a
+ * probed object nor an `objects/` directory resolves to null, so callers can
+ * refuse to touch the ledger instead of guessing.
+ */
+export function resolveAttachmentsRoot({
+  env = process.env,
+  homeFallback,
+  probeIds = [],
+  requireExistingObjects = false,
+} = {}) {
   const explicit = String(env.VHCU_ATTACHMENTS_ROOT ?? '').trim();
   if (explicit) return explicit;
-  const home = String(env.DSH_HOME ?? '').trim() || homeFallback;
-  if (!home) return null;
-  return join(home, 'attachments', 'v1');
+  const roots = attachmentRootCandidates({ env, homeFallback });
+  if (roots.length === 0) return null;
+  const ids = (Array.isArray(probeIds) ? probeIds : []).map(normalizeAttachmentId).filter(Boolean);
+  // A probed object on disk is the only unambiguous evidence of the real store.
+  for (const root of roots) {
+    for (const id of ids) {
+      const candidate = attachmentObjectPath(root, id);
+      if (candidate && existsSync(candidate)) return root;
+    }
+  }
+  if (!requireExistingObjects) {
+    for (const root of roots) {
+      if (existsSync(join(root, 'objects'))) return root;
+    }
+    return roots[0];
+  }
+  // Verification was requested but no probed object matched. With an empty ledger
+  // an existing `objects/` directory is the only evidence left; with entries in
+  // the ledger a miss means "cannot verify", and the caller must not touch it.
+  if (ids.length === 0) {
+    for (const root of roots) {
+      if (existsSync(join(root, 'objects'))) return root;
+    }
+  }
+  return null;
 }
 
 export class AttachmentRegistry {

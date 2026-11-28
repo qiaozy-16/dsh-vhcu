@@ -55,7 +55,7 @@ test('attachments: object paths cannot escape the store root', () => {
   assert.equal(attachmentObjectPath(root, ''), null);
 });
 
-test('attachments: root resolution prefers the explicit override, then DSH_HOME', () => {
+test('attachments: root resolution prefers the explicit override, then DSH_HOME, then the DSH default home', () => {
   assert.equal(
     resolveAttachmentsRoot({ env: { VHCU_ATTACHMENTS_ROOT: 'D:/x/v1', DSH_HOME: 'D:/home' } }),
     'D:/x/v1',
@@ -64,8 +64,60 @@ test('attachments: root resolution prefers the explicit override, then DSH_HOME'
     resolveAttachmentsRoot({ env: { DSH_HOME: 'D:/home' } }),
     join('D:/home', 'attachments', 'v1'),
   );
-  assert.equal(resolveAttachmentsRoot({ env: {}, homeFallback: 'D:/fallback' }), join('D:/fallback', 'attachments', 'v1'));
+  // The host process does not always receive DSH_HOME; DSH's documented default
+  // home is `<homedir>/.dsh`, so the unverified fallback must point there.
+  assert.equal(
+    resolveAttachmentsRoot({ env: {}, homeFallback: 'D:/fallback' }),
+    join('D:/fallback', '.dsh', 'attachments', 'v1'),
+  );
   assert.equal(resolveAttachmentsRoot({ env: {} }), null);
+});
+
+test('attachments: root resolution probes real objects when DSH_HOME is absent', () => {
+  const home = tempDir('root-probe');
+  try {
+    const probeDir = join(home, 'attachments', 'v1', 'objects', HEX_A.slice(0, 2));
+    mkdirSync(probeDir, { recursive: true });
+    writeFileSync(join(probeDir, HEX_A), 'png', 'utf8');
+    // The documented default exists too, but holds nothing; the probe must win
+    // over the hard-coded order instead of silently scanning an empty store.
+    mkdirSync(join(home, '.dsh', 'attachments', 'v1'), { recursive: true });
+
+    assert.equal(
+      resolveAttachmentsRoot({ env: {}, homeFallback: home, probeIds: [HEX_A] }),
+      join(home, 'attachments', 'v1'),
+      'the root that actually holds the probed object wins',
+    );
+    assert.equal(
+      resolveAttachmentsRoot({ env: {}, homeFallback: home, probeIds: [HEX_A], requireExistingObjects: true }),
+      join(home, 'attachments', 'v1'),
+    );
+    assert.equal(
+      resolveAttachmentsRoot({ env: {}, homeFallback: home }),
+      join(home, 'attachments', 'v1'),
+      'without a probe, the candidate that actually has objects/ is preferred',
+    );
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('attachments: an unverifiable inferred root refuses to resolve when required', () => {
+  const home = tempDir('root-unverified');
+  try {
+    assert.equal(
+      resolveAttachmentsRoot({ env: {}, homeFallback: home, probeIds: [HEX_A], requireExistingObjects: true }),
+      null,
+      'no candidate holds the object -> caller must refuse to touch the ledger',
+    );
+    assert.equal(
+      resolveAttachmentsRoot({ env: {}, homeFallback: home, probeIds: [HEX_A] }),
+      join(home, '.dsh', 'attachments', 'v1'),
+      'without the requirement the documented default is still reported for diagnosis',
+    );
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
 });
 
 test('attachments: ledger records, dedupes and reports the budget', () => {
@@ -177,8 +229,13 @@ test('attachments: cleanup trashes only existing files, forgets missing ones', a
       keepBytes: 0,
       trash: async (paths) => {
         trashed.push(...paths);
-        return paths.map((path) =>
-          path.includes(failingId) ? { path, ok: false, error: 'locked' } : { path, ok: true, via: 'electron' });
+        return paths.map((path) => {
+          if (path.includes(failingId)) return { path, ok: false, error: 'locked' };
+          // Simulate a real recycle-bin move. A stub that only *reports* success is
+          // rejected by the post-condition check on purpose.
+          rmSync(path, { force: true });
+          return { path, ok: true, via: 'electron' };
+        });
       },
     });
 
@@ -192,6 +249,75 @@ test('attachments: cleanup trashes only existing files, forgets missing ones', a
     assert.equal(result.keptCount, 1, 'the surviving count is reported for the UI');
     assert.equal(result.keptBytes, 300);
     assert.equal(trashed.length, 2, 'only existing files are handed to the recycle bin');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── recycle-bin post-conditions ─────────────────────────────────────────
+test('attachments: a recycle-bin call that leaves the file is a failure, not a freed byte', async () => {
+  const dir = tempDir('gc-lying');
+  try {
+    const root = join(dir, 'attachments', 'v1');
+    const id = 'a1'.repeat(32);
+    const file = join(root, 'objects', id.slice(0, 2), id);
+    mkdirSync(join(root, 'objects', id.slice(0, 2)), { recursive: true });
+    writeFileSync(file, 'png', 'utf8');
+
+    const registry = new AttachmentRegistry({ path: join(dir, 'registry.json') });
+    registry.record({ id, bytes: 321, at: 1 });
+
+    const result = await cleanupAttachments({
+      registry,
+      root,
+      keepCount: 0,
+      keepBytes: 0,
+      // The exact shape of the production bug: the backend says ok, nothing moves.
+      trash: async (paths) => paths.map((path) => ({ path, ok: true, via: 'electron' })),
+    });
+
+    assert.equal(result.trashed, 0);
+    assert.equal(result.trashedBytes, 0);
+    assert.equal(result.freedBytes, 0, 'nothing was freed, so nothing may be reported as freed');
+    assert.deepEqual(result.via, [], 'a claimed backend is not reported for a file that survived');
+    assert.equal(result.failed.length, 1);
+    assert.match(result.failed[0].error, /still present/);
+    assert.deepEqual(registry.list().map((item) => item.id), [id], 'the entry stays for a retry');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('attachments: trashed and missing bytes are reported separately', async () => {
+  const dir = tempDir('gc-bytes');
+  try {
+    const root = join(dir, 'attachments', 'v1');
+    const present = 'b1'.repeat(32);
+    const gone = 'c1'.repeat(32);
+    mkdirSync(join(root, 'objects', present.slice(0, 2)), { recursive: true });
+    writeFileSync(join(root, 'objects', present.slice(0, 2), present), 'png', 'utf8');
+
+    const registry = new AttachmentRegistry({ path: join(dir, 'registry.json') });
+    registry.record({ id: present, bytes: 900, at: 1 });
+    registry.record({ id: gone, bytes: 100, at: 2 });
+
+    const result = await cleanupAttachments({
+      registry,
+      root,
+      keepCount: 0,
+      keepBytes: 0,
+      trash: async (paths) => {
+        for (const path of paths) rmSync(path, { force: true });
+        return paths.map((path) => ({ path, ok: true, via: 'powershell' }));
+      },
+    });
+
+    assert.equal(result.trashed, 1);
+    assert.equal(result.trashedBytes, 900);
+    assert.equal(result.missing, 1);
+    assert.equal(result.missingBytes, 100);
+    assert.equal(result.freedBytes, 1000, 'the legacy aggregate stays the sum of both');
+    assert.deepEqual(result.via, ['powershell']);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -259,6 +385,18 @@ function callRoute(routes, path, { method = 'GET', headers = {}, body = null } =
     Promise.resolve(route.handler(req, res)).catch(reject);
   });
 }
+
+test('attachments: /vhcu/state exposes the store root cleanup scans', async () => {
+  await withPlugin(async ({ routes }, dir) => {
+    const state = await callRoute(routes, '/vhcu/state');
+    assert.equal(state.status, 200);
+    assert.equal(
+      state.body.state.attachments.root,
+      join(dir, 'attachments', 'v1'),
+      'a wrong root must be visible from the outside instead of only as a no-op cleanup',
+    );
+  });
+});
 
 test('attachments: /vhcu/attachments reports the ledger and rejects bad posts', async () => {
   await withPlugin(async ({ routes }) => {
