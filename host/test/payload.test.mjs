@@ -151,16 +151,55 @@ test('payload: a ref without attachmentId never becomes an image block', async (
   });
 });
 
-test('payload: capture_target and events stay on the URL track (intermediate)', async () => {
+test('payload: capture_target renderer can emit an image block too', async () => {
+  await withPlugin(async ({ tools }) => {
+    const def = tools.get('vhcu_capture_target');
+    const blocks = def.output.render({}, {
+      ok: true,
+      message: '目标窗口快照',
+      frame_url: 'http://x/target',
+      payload_mode: 'attachment',
+      attachment: { attachmentId: 'att_target' },
+      attachment_meta: { mediaType: 'image/png', bytes: 1234, width: 800, height: 600 },
+    });
+    assert.equal(blocks.length, 2);
+    assert.equal(blocks[1].type, 'image');
+    assert.equal(blocks[1].attachment.attachmentId, 'att_target');
+  });
+});
+
+test('payload: events renderer emits one block per attached event (max 3)', async () => {
+  await withPlugin(async ({ tools }) => {
+    const def = tools.get('vhcu_get_vision_events');
+    const base = { ok: true, payload_mode: 'attachment' };
+    const withImages = def.output.render({}, {
+      ...base,
+      events: [
+        { id: 1, ts: Date.now(), rois: [{ frame_url: 'u1' }], attachment: { attachmentId: 'e1' } },
+        { id: 2, ts: Date.now(), rois: [{ frame_url: 'u2' }], attachment: { attachmentId: 'e2' } },
+        { id: 3, ts: Date.now(), rois: [{ frame_url: 'u3' }] },
+      ],
+    });
+    assert.equal(withImages.length, 3, 'text + two images');
+    assert.equal(withImages[1].type, 'image');
+    assert.match(withImages[0].text, /image1=e1/);
+
+    const textOnly = def.output.render({}, { ...base, events: [{ id: 1, rois: [] }] });
+    assert.equal(textOnly.length, 1);
+    assert.equal(textOnly[0].type, 'text');
+  });
+});
+
+test('payload: attachment without a daemon degrades to URL with a hint', async () => {
   await withPlugin(async ({ tools }) => {
     const events = await tools.get('vhcu_get_vision_events').execute(
       { payload_mode_override: 'attachment' },
       {},
     );
     assert.equal(events.ok, true);
-    assert.equal(events.payload_mode, 'url');
-    assert.equal(events.payload_mode_downgraded, true);
-    assert.match(events.payload_hint, /vhcu_get_full_frame/);
+    assert.equal(events.count, 0, 'no diff events in a fresh mock');
+    assert.equal(events.payload_mode, 'attachment', 'empty result keeps the requested mode');
+    assert.equal(events.payload_attached_images, 0);
 
     const target = await tools.get('vhcu_capture_target').execute(
       { payload_mode_override: 'attachment' },
