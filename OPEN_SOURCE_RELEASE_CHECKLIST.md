@@ -75,7 +75,7 @@ outside this Git repository and are not tracked by `dsh-vhcu`.
 Scanned source and docs for user-specific absolute paths:
 
 ```powershell
-grep -RInE '[A-Za-z]:[\\/]+Users[\\/]+mate|/Users/mate|D:\\Users|D:/Users|Desktop-SLKN1PQ' `
+grep -RInE '[A-Za-z]:[\\/]+Users[\\/]+[^\\/]+|/Users/[^/]+|Desktop-[A-Za-z0-9]+' `
   lib host vision contract scripts README.md RELEASE_NOTES.md `
   --exclude-dir=__pycache__ --exclude='*.pyc'
 ```
