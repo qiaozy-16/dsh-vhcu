@@ -128,13 +128,14 @@ function collectSse(response) {
   return { frames, waiters };
 }
 
-test('plugin mounts ten routes, registers twenty-eight tools, and reports idle state', { timeout: 20000 }, async () => {
+test('plugin mounts eleven routes, registers twenty-eight tools, and reports idle state', { timeout: 20000 }, async () => {
   const { ctx, routes, tools, dispose } = createMockCtx({ logger: { info() {}, warn() {}, error() {}, debug() {} } });
   apply(ctx);
   assert.deepEqual(
     [...routes.keys()].sort(),
     [
       '/vhcu/approval',
+      '/vhcu/attachments',
       '/vhcu/control',
       '/vhcu/emergency-stop',
       '/vhcu/events',

@@ -84,6 +84,29 @@ class PngTest(unittest.TestCase):
         width, height = struct.unpack(">II", payload[16:24])
         self.assertEqual((width, height), (2, 1))
 
+    def test_png_uses_per_row_filters(self):
+        # Screen-like content: flat blocks plus a vertical gradient. Filter 0
+        # should lose to Sub/Up/Paeth on at least one row.
+        width, height = 64, 40
+        rows = []
+        for y in range(height):
+            row = bytearray()
+            for x in range(width):
+                if y < 8:
+                    row += bytes((40, 44, 56))
+                elif 8 <= y < 20 and 8 <= x < 48:
+                    row += bytes((52, 58, 74))
+                else:
+                    row += bytes(((x * 7) % 256, (y * 13) % 256, (x + y) % 256))
+            rows.append(bytes(row))
+        payload = encode_png(width, height, rows)
+        idat_len = struct.unpack(">I", payload[33:37])[0]
+        raw = zlib.decompress(payload[41:41 + idat_len])
+        self.assertEqual(len(raw), height * (1 + width * 3))
+        filters = {raw[i * (1 + width * 3)] for i in range(height)}
+        self.assertLessEqual(filters, {0, 1, 2, 4})
+        self.assertTrue(filters - {0}, f"expected a non-zero PNG filter, got {filters}")
+
     def test_render_downscales_and_crops(self):
         frame = FakeSource(width=320, height=180).grab()
         payload, out_w, out_h = render_png(frame, 10, 10, 100, 50, max_width=25)

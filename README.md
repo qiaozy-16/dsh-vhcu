@@ -114,6 +114,25 @@ degrade to the signed URL and report `payload_mode_downgraded: true` with a hint
 An inline-base64 text track existed briefly and was removed: hosts treat the
 data URI as text, truncate it, and the model still sees nothing.
 
+### Attachment budget and the recycle bin
+
+The host attachment store is append-only, content-addressed and shared with other
+components; its own documentation says stored objects are never deleted
+automatically, and the service exposes no delete or list API. VHCU therefore:
+
+- keeps its own ledger (`attachments_registry.json`) of the attachments **it**
+  created and only ever reclaims those ids;
+- stops generating attachments at **2000 images or 500 MiB** (whichever comes
+  first) and silently falls back to the signed URL;
+- moves reclaimed files to the **OS recycle bin** (`shell.trashItem`, with a
+  Windows `SendToRecycleBin` fallback) — never a permanent delete, so a user can
+  restore them and antivirus does not see a data-destroying plugin;
+- shows `Attachments: n/2000 · x/500 MB` in the panel, turns red near the cap and
+  offers a one-click cleanup that keeps the newest 200 screenshots.
+
+Cleaning can invalidate VHCU screenshots in older chat history — the UI says so
+next to the button.
+
 ## Architecture
 
 ```mermaid

@@ -212,7 +212,12 @@ Node supervisor.spawn(python, ['-u','-m','vhcu_daemon','--parent-pid',<hostPid>,
 - token 本身**没有过期时间**，只在 daemon 生命周期内有效；5 分钟 TTL 完全由 Node 层 `exp` 承担（事实）。
 - **attachment 轨复用同一图床**（2026-11-28）：`visionPayloadMode='attachment'`（或单次 `payload_mode_override`）时，
   Node 用同一组 `port/token/roi/seq` 再 `GET /frame` 一次拿 PNG 字节，交给宿主附件服务换取 image 内容块。
-  图床协议未改；失败时回退签名 URL，不影响原有链路。早期的 base64 文本内联已废弃（宿主会截断长文本）。README 的 "short-lived signed URLs"（`README.md:88`）因此只对 Node 层成立。
+  图床协议未改；失败时回退签名 URL，不影响原有链路。早期的 base64 文本内联已废弃（宿主会截断长文本）。
+
+- **PNG 编码优化**（2026-11-28）：`vision/vhcu_daemon/png.py` 从"filter 0 + zlib level 3"改为
+  **逐行选择 Sub/Up/Paeth 滤波（numpy 向量化）+ zlib level 6**。真实 1280×720 桌面帧实测
+  560,798 B → 449,042 B（**-19.6%**），编码 ~300 ms。level 9 只再省 2.5% 却要 ~1 s，故不采用；
+  无 numpy 时回退 filter 0（仍是 level 6）。附件库按字节封顶，所以这一项直接决定配额能撑多久。README 的 "short-lived signed URLs"（`README.md:88`）因此只对 Node 层成立。
 - `/interrupt` 是唯一能在命令循环卡住时打断的通道：Node 直接 POST，Python 侧 set `InterruptController`（`httpframe.py:125-136`；`cli.py:770-778`）。`InterruptController` 是 `threading.Event`，InputController 每个步骤与可中断 sleep 都 check（`interrupts.py:23-60`；`input.py:599-601,1730-1734`）。
 
 ### 3.8 PID 记录与单实例（`pidfile.py`）
@@ -272,7 +277,7 @@ Node supervisor.spawn(python, ['-u','-m','vhcu_daemon','--parent-pid',<hostPid>,
 - 13 个测试模块，静态计数 **258 个 `def test_`**（未执行，仅 grep 计数；不作为通过证据）：
   `test_input.py` 72、`test_hear.py` 37、`test_capture.py` 23、`test_units.py` 23、`test_element_registry.py` 20、`test_uia_worker.py` 19、`test_privacy.py` 13、`test_virtual_cursor.py` 12、`test_human_input.py` 11、`test_platform.py` 11、`test_pidfile.py` 8、`test_cursor_overlay.py` 6、`test_shapes.py` 3。
 - 覆盖面（按文件）：
-  - `test_units.py`：FakeSource、diff、PNG 编码、Protocol/parse_line、HttpFrameServer、parent watchdog、Runner 捕获、帧缩放；
+  - `test_units.py`：FakeSource、diff、PNG 编码（含逐行滤波器）、Protocol/parse_line、HttpFrameServer、parent watchdog、Runner 捕获、帧缩放；
   - `test_capture.py`：mss origin、质量检测、GDI 回退顺序、遮挡/最小化拒绝、隐私帧缓存清理、overlay 隐藏/恢复、frame_seq 近期帧；
   - `test_platform.py`：绝对路径、InterruptController、驱动工厂、HTTP interrupt、safety 纯函数；
   - `test_input.py` / `test_human_input.py` / `test_shapes.py`：注入参数校验、dry-run、humanize 轨迹、形状生成；
