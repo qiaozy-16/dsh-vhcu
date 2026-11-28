@@ -10,7 +10,7 @@
 
 const noop = () => {};
 
-export function createMockCtx({ logger = console, label = 'vhcu-mock' } = {}) {
+export function createMockCtx({ logger = console, label = 'vhcu-mock', services = {} } = {}) {
   const routes = new Map();
   const tools = new Map();
   const disposeHandlers = [];
@@ -71,6 +71,14 @@ export function createMockCtx({ logger = console, label = 'vhcu-mock' } = {}) {
     },
     emit(event, payload) {
       emitted.push({ event, payload });
+    },
+    /**
+     * Host service accessor (Cordis style). Tests inject fake services such as
+     * `attachments` or `llm`; anything else resolves to undefined, which the
+     * plugin treats as "deployment does not provide it".
+     */
+    get(name) {
+      return services[name];
     },
   };
 

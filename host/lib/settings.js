@@ -18,7 +18,7 @@ const IME_SHORTCUTS = new Set(['ctrl+space', 'shift', 'none']);
 const HEAR_SENSITIVITY = new Set(['strict', 'normal', 'sensitive']);
 const HUMANIZE_PROFILES = new Set(['off', 'precise', 'balanced']);
 const CURSOR_MODES = new Set(['physical', 'virtual', 'uia', 'hybrid']);
-const VISION_PAYLOAD_MODES = new Set(['url', 'base64']);
+const VISION_PAYLOAD_MODES = new Set(['url', 'attachment']);
 
 export const DEFAULT_SETTINGS = Object.freeze({
   debug: false,
@@ -69,6 +69,14 @@ function normalizedRetries(value) {
   return Math.max(0, Math.min(5, Math.trunc(parsed)));
 }
 
+/** url | attachment; retired `base64` migrates to attachment, junk -> default. */
+function normalizePayloadSetting(value) {
+  const raw = String(value ?? '').trim().toLowerCase();
+  if (raw === 'attachment' || raw === 'base64') return 'attachment';
+  if (raw === 'url') return 'url';
+  return DEFAULT_SETTINGS.visionPayloadMode;
+}
+
 function normalizedUiaDepth(value) {
   const parsed = Number(value);
   if (!Number.isInteger(parsed) || parsed < 1 || parsed > 10) return DEFAULT_SETTINGS.uiaDefaultDepth;
@@ -97,9 +105,7 @@ function baseSettings(current = {}) {
       ? current.cursorInjectionMode
       : DEFAULT_SETTINGS.cursorInjectionMode,
     allowHighPrecisionVision: current.allowHighPrecisionVision !== false,
-    visionPayloadMode: VISION_PAYLOAD_MODES.has(current.visionPayloadMode)
-      ? current.visionPayloadMode
-      : DEFAULT_SETTINGS.visionPayloadMode,
+    visionPayloadMode: normalizePayloadSetting(current.visionPayloadMode),
     enableMacroAutoGeneration: current.enableMacroAutoGeneration === true,
     allowUiaValueRead: Boolean(current.allowUiaValueRead),
     uiaDefaultDepth: normalizedUiaDepth(current.uiaDefaultDepth ?? DEFAULT_SETTINGS.uiaDefaultDepth),
@@ -143,8 +149,9 @@ export function mergeSettings(current, patch) {
   if (typeof patch.allowHighPrecisionVision === 'boolean') {
     next.allowHighPrecisionVision = patch.allowHighPrecisionVision;
   }
-  if (VISION_PAYLOAD_MODES.has(patch.visionPayloadMode)) {
-    next.visionPayloadMode = patch.visionPayloadMode;
+  if (patch.visionPayloadMode !== undefined) {
+    const normalized = normalizePayloadSetting(patch.visionPayloadMode);
+    if (normalized) next.visionPayloadMode = normalized;
   }
   if (typeof patch.enableMacroAutoGeneration === 'boolean') {
     next.enableMacroAutoGeneration = patch.enableMacroAutoGeneration;
