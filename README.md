@@ -98,10 +98,11 @@ see, which leaves the model blind. VHCU therefore ships two transports,
 selectable globally or per call:
 
 - **`url` (default)** — the tool result embeds a short-lived signed URL. Cheapest
-  in tokens; requires the host to fetch the URL.
+  in tokens and it writes nothing to the host attachment store.
 - **`attachment`** — VHCU stores the PNG in the host attachment service and
   returns an `image` content block, so the model receives actual pixels. This is
-  the same mechanism native vision plugins use.
+  the same mechanism native vision plugins use, but every screenshot is persisted
+  on disk until an explicit cleanup, so it is opt-in.
 
 Set `visionPayloadMode` in the settings panel, or pass
 `payload_mode_override: 'url' | 'attachment'` on `vhcu_get_full_frame`,
@@ -128,24 +129,45 @@ automatically, and the service exposes no delete or list API. VHCU therefore:
   home; the host process does not always receive `DSH_HOME`), then the legacy
   `~/attachments/v1`. The scanned root is reported as `attachments.root` on
   `GET /vhcu/state`, so a wrong path is visible instead of silently no-op;
+- **only reclaims orphans.** Before deleting anything it scans the session logs
+  (`DSH_HOME/sessions/**/session.v4.jsonl.zstd`, legacy
+  `~/.dsh/sessions`) for every `attachmentId` they reference. An id that is still
+  referenced is never touched: a historical image block whose object vanished
+  makes that session unreadable, because the next model request raises
+  `ATTACHMENT_NOT_FOUND` and the provider surfaces it as
+  `DeepSeek Messages transport failed`. If the scan cannot complete (unsupported
+  zstd runtime, unreadable log, budget exhausted) cleanup **refuses to delete**
+  with HTTP 503 `E_ATTACHMENT_REFS_UNVERIFIED` instead of guessing;
 - stops generating attachments at **2000 images or 500 MiB** (whichever comes
   first) and silently falls back to the signed URL;
-- moves reclaimed files to the **OS recycle bin** (`shell.trashItem`, with a
-  Windows `SendToRecycleBin` fallback) — never a permanent delete, so a user can
-  restore them and antivirus does not see a data-destroying plugin;
+- moves reclaimed files to the **OS recycle bin** in batches of at most 50 per
+  PowerShell process (3 s per batch, 10 ms between batches)
+  (`shell.trashItem`, with a Windows `SendToRecycleBin` fallback) — never a
+  permanent delete, so a user can restore them and antivirus does not see a
+  data-destroying plugin;
 - **verifies every move**: a backend that claims success but leaves the file in
   place is reported as a failure and the ledger entry is kept, so a failed run
   can never report freed bytes that are still on disk. Cleanup also refuses to
   touch the ledger (HTTP 503, `E_ATTACHMENTS_ROOT`) when no candidate root can be
   verified against a single recorded id;
-- shows `Attachments: n/2000 · x/500 MB` in the panel, turns red near the cap and
-  offers a one-click cleanup that keeps the newest 10% (at least one screenshot)
-  and moves the rest to the recycle bin; below two attachments the button is
-  disabled as "nothing to clean". The result line separates files actually moved
-  from ledger entries whose object was already gone.
+- shows `Attachments: n/2000 · x/500 MB` in the panel and offers a one-click
+  **"Clean VHCU orphan attachments"** action that only moves orphaned ids to the
+  recycle bin. The result line separates files actually moved, ledger entries
+  whose object was already gone, and screenshots kept because a session still
+  references them.
 
-Cleaning can invalidate VHCU screenshots in older chat history — the UI says so
-next to the button.
+> **Scope.** The panel button only cleans VHCU's own orphaned screenshots. A real
+> profile can hold ~1000 objects / ~600 MB while VHCU's ledger has a single entry —
+> other components write to the same store. If the store is still large, point
+> it at another volume with a directory junction (for example
+> `mklink /J %USERPROFILE%\.dsh\attachments D:\dsh-attachments`) or wait for
+> first-class attachment governance in DSH. VHCU deliberately does not delete
+> objects it did not create, and it never rewrites session history.
+
+Screenshots stay lossless PNG on purpose. JPEG would cut the payload several
+times over, but CUA depends on razor-sharp glyph edges for OCR and coordinate
+picking; 449 KB per frame against a 500 MiB budget is a trade worth keeping. The
+encoder picks a PNG filter per row and still uses RGB, no lossy step anywhere.
 
 Screenshots stay lossless PNG on purpose. JPEG would cut the payload several
 times over, but CUA depends on razor-sharp glyph edges for OCR and coordinate

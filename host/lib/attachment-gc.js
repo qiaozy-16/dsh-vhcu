@@ -25,10 +25,19 @@ import { trashFiles } from './trash.js';
  *   trash?: (paths: string[]) => Promise<Array<{path: string, ok: boolean, error?: string}>>,
  *   keepCount?: number,
  *   keepBytes?: number,
+ *   referencedIds?: Iterable<string> | null,
  *   logger?: {warn?: Function},
  * }} options
  */
-export async function cleanupAttachments({ registry, root, trash = trashFiles, keepCount, keepBytes, logger } = {}) {
+export async function cleanupAttachments({
+  registry,
+  root,
+  trash = trashFiles,
+  keepCount,
+  keepBytes,
+  referencedIds = null,
+  logger,
+} = {}) {
   if (!registry) throw new TypeError('cleanupAttachments requires a registry');
   if (!root) throw new TypeError('cleanupAttachments requires the attachment root');
 
@@ -37,9 +46,16 @@ export async function cleanupAttachments({ registry, root, trash = trashFiles, k
     ...item,
     path: attachmentObjectPath(root, item.id),
   }));
+  // Referenced ids are never touched: a session history that still points at the
+  // object would fail its next request with ATTACHMENT_NOT_FOUND (surfaced as
+  // "transport failed"), and no retry can repair that.
+  const referenced = referencedIds instanceof Set ? referencedIds : new Set(referencedIds ?? []);
+  const protectedItems = candidates.filter((item) => referenced.has(item.id));
+  const reclaimable = candidates.filter((item) => !referenced.has(item.id));
   // Ledger entries whose object already vanished are simply forgotten.
-  const missing = candidates.filter((item) => !item.path || !existsSync(item.path));
-  const present = candidates.filter((item) => item.path && existsSync(item.path));
+  const missing = reclaimable.filter((item) => !item.path || !existsSync(item.path));
+  const present = reclaimable.filter((item) => item.path && existsSync(item.path));
+
 
   let results = [];
   if (present.length > 0) {
@@ -106,6 +122,8 @@ export async function cleanupAttachments({ registry, root, trash = trashFiles, k
     missingBytes,
     via,
     failed,
+    protectedCount: protectedItems.length,
+    failedCount: failed.length,
     keptCount: registry.count,
     keptBytes: registry.bytes,
     stats: registry.stats(),

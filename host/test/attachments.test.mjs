@@ -18,6 +18,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import * as zlib from 'node:zlib';
 
 import {
   ATTACHMENT_BYTE_LIMIT,
@@ -334,6 +335,9 @@ function withPlugin(fn, env = {}) {
     VHCU_SESSION_STATE_PATH: join(dir, 'session.json'),
     VHCU_ATTACHMENTS_REGISTRY: join(dir, 'attachments_registry.json'),
     VHCU_ATTACHMENTS_ROOT: join(dir, 'attachments', 'v1'),
+    // Cleanup scans session logs for referenced ids. Keep tests hermetic and
+    // fast: an empty root means "no sessions reference anything".
+    VHCU_SESSIONS_ROOT: join(dir, 'sessions'),
     VHCU_DISABLE_USER_TAKEOVER: '1',
     ...env,
   });
@@ -446,9 +450,146 @@ test('attachments: POST cleanup on missing objects forgets them without a recycl
         body: { action: 'cleanup', keep_count: 0 },
       });
       assert.equal(cleaned.status, 200);
-      assert.equal(cleaned.body.result.missing, 1);
-      assert.equal(cleaned.body.result.trashed, 0);
+      assert.equal(cleaned.body.missing, 1);
+      assert.equal(cleaned.body.trashed, 0);
       assert.equal(cleaned.body.attachments.count, 0);
+    } finally {
+      second.dispose();
+    }
+  });
+});
+
+// ── orphan-only cleanup: session references are sacred ──────────────────
+test('attachments: cleanup never touches an id that a session still references', async () => {
+  const dir = tempDir('gc-refs');
+  try {
+    const root = join(dir, 'attachments', 'v1');
+    const kept = 'a3'.repeat(32);
+    const orphan = 'b3'.repeat(32);
+    for (const id of [kept, orphan]) {
+      mkdirSync(join(root, 'objects', id.slice(0, 2)), { recursive: true });
+      writeFileSync(join(root, 'objects', id.slice(0, 2), id), 'png', 'utf8');
+    }
+    const registry = new AttachmentRegistry({ path: join(dir, 'registry.json') });
+    registry.record({ id: kept, bytes: 100, at: 1 });
+    registry.record({ id: orphan, bytes: 200, at: 2 });
+
+    const trashed = [];
+    const result = await cleanupAttachments({
+      registry,
+      root,
+      keepCount: 0,
+      keepBytes: 0,
+      referencedIds: new Set([kept]),
+      trash: async (paths) => {
+        trashed.push(...paths);
+        for (const path of paths) rmSync(path, { force: true });
+        return paths.map((path) => ({ path, ok: true, via: 'electron' }));
+      },
+    });
+
+    assert.equal(result.trashed, 1);
+    assert.equal(result.protectedCount, 1);
+    assert.equal(result.freedBytes, 200);
+    assert.deepEqual(registry.list().map((item) => item.id), [kept], 'the referenced entry stays in the ledger');
+    assert.equal(trashed.length, 1);
+    assert.ok(!trashed[0].includes(kept), 'the referenced object was never handed to the recycle bin');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('attachments: the cleanup route protects referenced ids and returns only aggregates', async () => {
+  if (typeof zlib.zstdCompressSync !== 'function') return; // Node without zstd: scan disabled, covered elsewhere
+  const logger = { debug() {}, info() {}, warn() {}, error() {} };
+  await withPlugin(async ({ routes }, dir) => {
+    const kept = 'c3'.repeat(32);
+    const orphan = 'd3'.repeat(32);
+    const root = join(dir, 'attachments', 'v1');
+    mkdirSync(join(root, 'objects', kept.slice(0, 2)), { recursive: true });
+    writeFileSync(join(root, 'objects', kept.slice(0, 2), kept), 'png', 'utf8');
+    // The orphan has a ledger entry but no object on disk: that path never
+    // invokes the real recycle bin, so the test stays hermetic.
+    mkdirSync(join(root, 'objects', orphan.slice(0, 2)), { recursive: true });
+
+    const sessions = join(dir, 'sessions');
+    mkdirSync(join(sessions, 'ws', 'session-a'), { recursive: true });
+    const line = JSON.stringify({
+      type: 'tool/result',
+      data: {
+        message: {
+          content: [
+            { type: 'image', attachment: { attachmentId: `sha256:${kept}`, mediaType: 'image/png', width: 1, height: 1, bytes: 3 } },
+          ],
+        },
+      },
+    });
+    writeFileSync(join(sessions, 'ws', 'session-a', 'session.v4.jsonl.zstd'), zlib.zstdCompressSync(Buffer.from(line)));
+
+    writeFileSync(
+      join(dir, 'attachments_registry.json'),
+      JSON.stringify({
+        version: 1,
+        revision: 1,
+        items: [
+          { id: kept, bytes: 100, at: 1 },
+          { id: orphan, bytes: 200, at: 2 },
+        ],
+      }),
+      'utf8',
+    );
+
+    const second = createMockCtx({ logger });
+    apply(second.ctx);
+    try {
+      const cleaned = await callRoute(second.routes, '/vhcu/attachments', {
+        method: 'POST',
+        headers: { 'x-vhcu': '1' },
+        body: { action: 'cleanup', keep_count: 0 },
+      });
+      assert.equal(cleaned.status, 200);
+      assert.equal(cleaned.body.protectedCount, 1, 'the referenced id is reported as protected');
+      assert.equal(cleaned.body.missing, 1, 'the orphan ledger entry was forgotten as missing');
+      assert.equal(cleaned.body.trashed, 0);
+      assert.equal(cleaned.body.attachments.count, 1, 'the referenced entry stays in the ledger');
+      assert.equal(cleaned.body.result, undefined, 'the response no longer carries a raw result object');
+      assert.ok(!JSON.stringify(cleaned.body).includes(kept), 'responses must not leak attachment ids');
+      assert.ok(!JSON.stringify(cleaned.body).includes(root), 'responses must not leak absolute paths');
+      assert.ok(cleaned.body.references && cleaned.body.references.ids >= 1);
+    } finally {
+      second.dispose();
+    }
+  });
+});
+
+test('attachments: an incomplete session scan blocks cleanup with 503', async () => {
+  const logger = { debug() {}, info() {}, warn() {}, error() {} };
+  await withPlugin(async ({ routes }, dir) => {
+    const id = 'e3'.repeat(32);
+    const sessions = join(dir, 'sessions');
+    mkdirSync(join(sessions, 'ws', 'session-broken'), { recursive: true });
+    // Magic + garbage: the frame cannot decode, so the scan must be incomplete.
+    writeFileSync(
+      join(sessions, 'ws', 'session-broken', 'session.v4.jsonl.zstd'),
+      Buffer.from([0x28, 0xb5, 0x2f, 0xfd, 0x00, 0x00, 0x00, 0x00]),
+    );
+    writeFileSync(
+      join(dir, 'attachments_registry.json'),
+      JSON.stringify({ version: 1, revision: 1, items: [{ id, bytes: 10, at: 1 }] }),
+      'utf8',
+    );
+
+    const second = createMockCtx({ logger });
+    apply(second.ctx);
+    try {
+      const cleaned = await callRoute(second.routes, '/vhcu/attachments', {
+        method: 'POST',
+        headers: { 'x-vhcu': '1' },
+        body: { action: 'cleanup', keep_count: 0 },
+      });
+      assert.equal(cleaned.status, 503);
+      assert.equal(cleaned.body.code, 'E_ATTACHMENT_REFS_UNVERIFIED');
+      assert.equal(cleaned.body.attachments.count, 1, 'the ledger is untouched when references cannot be verified');
     } finally {
       second.dispose();
     }

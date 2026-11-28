@@ -20,17 +20,19 @@ export const VISION_PAYLOAD_MODES = Object.freeze(['url', 'attachment']);
 /**
  * Coerce any stored/patched value to a known mode.
  *
- * Legacy migration: `base64` (retired text track) maps to `attachment`, which
- * is what the user was trying to achieve when they selected it.
+ * Legacy migration: `base64` (retired text track) maps to `url`, never to
+ * `attachment`. The attachment track is the one that writes into the host store
+ * on every screenshot, so a stale stored value must not opt the user back into
+ * unbounded growth; `attachment` now requires a deliberate selection.
  * Unknown values fall back instead of throwing: a corrupt settings file must
  * never make the plugin unusable.
  */
 export function normalizeVisionPayloadMode(value, fallback = 'url') {
   const raw = String(value ?? '').trim().toLowerCase();
-  if (raw === 'attachment' || raw === 'base64') return 'attachment';
-  if (raw === 'url') return 'url';
+  if (raw === 'attachment') return 'attachment';
+  if (raw === 'url' || raw === 'base64') return 'url';
   const resolvedFallback = String(fallback ?? '').trim().toLowerCase();
-  if (resolvedFallback === 'attachment' || resolvedFallback === 'base64') return 'attachment';
+  if (resolvedFallback === 'attachment') return 'attachment';
   return 'url';
 }
 

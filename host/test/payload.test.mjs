@@ -26,11 +26,11 @@ import { DEFAULT_SETTINGS, mergeSettings } from '../lib/settings.js';
 import { apply } from '../../lib/index.js';
 import { createMockCtx } from '../../dev/mock-ctx.mjs';
 
-test('payload: modes are url/attachment and legacy base64 migrates', () => {
+test('payload: modes are url/attachment and legacy base64 migrates to url', () => {
   assert.deepEqual([...VISION_PAYLOAD_MODES], ['url', 'attachment']);
   assert.equal(normalizeVisionPayloadMode('url'), 'url');
   assert.equal(normalizeVisionPayloadMode('attachment'), 'attachment');
-  assert.equal(normalizeVisionPayloadMode('base64'), 'attachment', 'retired track migrates');
+  assert.equal(normalizeVisionPayloadMode('base64'), 'url', 'retired track must not resume writing attachments');
   assert.equal(normalizeVisionPayloadMode('  ATTACHMENT '), 'attachment');
   assert.equal(normalizeVisionPayloadMode('jpeg'), 'url');
   assert.equal(normalizeVisionPayloadMode(undefined), 'url');
@@ -40,7 +40,7 @@ test('payload: modes are url/attachment and legacy base64 migrates', () => {
 test('payload: override wins, invalid override never flips the setting', () => {
   assert.equal(resolveVisionPayloadMode({ override: 'attachment', setting: 'url' }), 'attachment');
   assert.equal(resolveVisionPayloadMode({ override: 'url', setting: 'attachment' }), 'url');
-  assert.equal(resolveVisionPayloadMode({ override: 'base64', setting: 'url' }), 'attachment');
+  assert.equal(resolveVisionPayloadMode({ override: 'base64', setting: 'url' }), 'url');
   assert.equal(resolveVisionPayloadMode({ override: 'png', setting: 'attachment' }), 'attachment');
   assert.equal(resolveVisionPayloadMode({ setting: 'attachment' }), 'attachment');
   assert.equal(resolveVisionPayloadMode({}), 'url');
@@ -48,13 +48,13 @@ test('payload: override wins, invalid override never flips the setting', () => {
   assert.equal(needsAttachmentStore('url'), false);
 });
 
-test('payload: settings default url, accept attachment, migrate base64', () => {
+test('payload: settings default url, accept attachment, migrate base64 to url', () => {
   assert.equal(DEFAULT_SETTINGS.visionPayloadMode, 'url');
   assert.equal(mergeSettings({}, { visionPayloadMode: 'attachment' }).visionPayloadMode, 'attachment');
   assert.equal(
     mergeSettings({ visionPayloadMode: 'base64' }, {}).visionPayloadMode,
-    'attachment',
-    'persisted legacy value must migrate on load',
+    'url',
+    'a persisted legacy value must not silently opt back into the attachment store',
   );
   assert.equal(mergeSettings({}, { visionPayloadMode: 'jpeg' }).visionPayloadMode, 'url');
   assert.equal(

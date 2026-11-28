@@ -69,11 +69,15 @@ function normalizedRetries(value) {
   return Math.max(0, Math.min(5, Math.trunc(parsed)));
 }
 
-/** url | attachment; retired `base64` migrates to attachment, junk -> default. */
+/**
+ * url | attachment. The retired `base64` text track migrates to `url`, never to
+ * `attachment`: the attachment store grows without bound, so a legacy stored
+ * value must not silently start writing screenshots into it again.
+ */
 function normalizePayloadSetting(value) {
   const raw = String(value ?? '').trim().toLowerCase();
-  if (raw === 'attachment' || raw === 'base64') return 'attachment';
-  if (raw === 'url') return 'url';
+  if (raw === 'attachment') return 'attachment';
+  if (raw === 'url' || raw === 'base64') return 'url';
   return DEFAULT_SETTINGS.visionPayloadMode;
 }
 
