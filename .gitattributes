@@ -1,0 +1,22 @@
+# ── Line endings ─────────────────────────────────────────────────
+# Normalize every text file to LF inside the repository, on every
+# platform. Without this, packaging on Windows rewrites the whole
+# tree as CRLF and turns a one-line fix into a 20k-line diff.
+* text=auto eol=lf
+
+# ── Binary assets (never normalize, never diff as text) ──────────
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.zip binary
+*.exe binary
+*.dll binary
+*.node binary
+*.whl binary
+*.pdf binary
+*.bin binary
+*.onnx binary
+*.pt binary
+*.safetensors binary

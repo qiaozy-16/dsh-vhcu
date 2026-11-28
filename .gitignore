@@ -43,6 +43,7 @@ wheels/
 # ── Build / packaging ───────────────────────────────────────────
 dist/
 build/
+release/
 *.zip
 
 # ── Local secrets / environment ─────────────────────────────────
