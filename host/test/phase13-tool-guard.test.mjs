@@ -94,3 +94,41 @@ test('phase13: legacy exec.args shape still denies (backward-compatible fallback
     assert.equal(result.error?.info?.code, 'E_SCRIPT_WRITE_DENIED');
   });
 });
+
+// The three Windows script extensions are interchangeable for the guard: a
+// helper written as .ps1/.cmd/.bat is just as much "vision by script" as .py.
+for (const ext of ['ps1', 'cmd', 'bat']) {
+  test(`phase13: helper script write (.${ext}) is denied`, async () => {
+    await withPlugin(async ({ runTool }) => {
+      const result = await runTool({
+        name: 'pwsh',
+        arguments: { command: `Set-Content -Path vhcu-${ext}.${ext} -Value 'x'` },
+      });
+      assert.equal(result.isError, true);
+      assert.equal(result.error?.info?.code, 'E_SCRIPT_WRITE_DENIED');
+      assert.match(result.error?.info?.name ?? '', /ScriptWriteDenied/);
+    });
+  });
+}
+
+test('phase13: reading an existing vhcu script is not a write and passes', async () => {
+  await withPlugin(async ({ runTool }) => {
+    const result = await runTool({
+      name: 'ops_bash',
+      arguments: { command: 'Get-Content vhcu-old.ps1' },
+    });
+    assert.equal(result.isError, false);
+    assert.equal(result.content?.[0]?.text, 'tool-allowed');
+  });
+});
+
+test('phase13: nested argument objects are still scanned (collectText depth)', async () => {
+  await withPlugin(async ({ runTool }) => {
+    const result = await runTool({
+      name: 'ops_bash',
+      arguments: { opts: { nested: { command: 'python -c "x" > vhcu-deep.py' } } },
+    });
+    assert.equal(result.isError, true);
+    assert.equal(result.error?.info?.code, 'E_SCRIPT_WRITE_DENIED');
+  });
+});

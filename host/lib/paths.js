@@ -27,7 +27,7 @@ function dataRoot(env) {
   return env.LOCALAPPDATA || env.XDG_DATA_HOME || join(homedir(), '.local', 'share');
 }
 
-function profileToken(env, explicit) {
+export function profileToken(env, explicit) {
   const raw = String(
     explicit ?? env.DSH_PROFILE_KEY ?? env.DSH_PROFILE ?? env.DSH_PROFILE_DIR ?? '',
   ).trim();
@@ -54,6 +54,10 @@ export function resolveRuntimePaths({ root, env = process.env, data, profile } =
   // per-profile. Without a profile token preserve the legacy single path.
   const stateDir = scope ? join(dataDir, 'dsh-vhcu', 'profiles', scope) : join(dataDir, 'dsh-vhcu');
   return Object.freeze({
+    // Where per-profile user state would live. Exposed verbatim (rather than
+    // re-derived from settings) so callers can report the effective scope even
+    // when individual files are overridden by VHCU_* env vars.
+    stateDir,
     models: env.VHCU_MODEL_PATH
       ? absolute(env.VHCU_MODEL_PATH, 'VHCU_MODEL_PATH')
       : join(base, 'models'),
